@@ -43,10 +43,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# 配置 npm 国内镜像源 + Prisma 引擎二进制镜像源
-# 通过 npm 配置持久化国内镜像源
-RUN npm config set registry https://registry.npmmirror.com \
-    && npm config set prisma_engines_mirror https://registry.npmmirror.com/-/binary/prisma
+# 配置 npm 国内镜像源
+# 注:Prisma 引擎镜像通过 PRISMA_ENGINES_MIRROR 环境变量配置,
+#     新版 npm(10.x+)不再接受 `npm config set prisma_engines_mirror` 命令
+RUN npm config set registry https://registry.npmmirror.com
+
+# Prisma 引擎二进制镜像(npmmirror 淘宝镜像)
+# 提前到 npm ci 之前:@prisma/client 的 postinstall 脚本会下载引擎,
+# 必须在此之前生效,否则会走默认国外源导致国内构建超时
+ENV PRISMA_ENGINES_MIRROR=https://registry.npmmirror.com/-/binary/prisma
 
 # 先复制 package*.json 利用 Docker 层缓存
 # 强制要求 package-lock.json 必须存在（去掉通配符），保证可重现构建
@@ -66,8 +71,7 @@ COPY src ./src
 RUN npm run build
 
 # 生成 Prisma Client（基于 SQLite schema）
-# 通过 PRISMA_ENGINES_MIRROR 环境变量双重确保引擎从国内镜像下载
-ENV PRISMA_ENGINES_MIRROR=https://registry.npmmirror.com/-/binary/prisma
+# PRISMA_ENGINES_MIRROR 已在上方设置,确保引擎从国内镜像下载
 RUN ./node_modules/.bin/prisma generate
 
 # ============== Stage 2: runner ==============
