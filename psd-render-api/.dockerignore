@@ -2,20 +2,21 @@
 # 减少构建上下文体积，加速镜像构建
 
 # 依赖与构建产物（在镜像内重新生成）
-node_modules
-dist
+# 注:必须使用前导 / 限定根目录,否则 `storage` 会匹配 src/services/storage 源码目录
+/node_modules
+/dist
 **/*.tsbuildinfo
 
 # 本地数据与日志
-dev.db
-dev.db-journal
+/dev.db
+/dev.db-journal
 *.db
 *.db-journal
-storage
-logs
+/storage
+/logs
 *.log
-server.log
-server-err.log
+/server.log
+/server-err.log
 
 # 环境变量与密钥（生产通过 docker-compose env_file 注入）
 .env
