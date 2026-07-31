@@ -36,6 +36,26 @@ declare module 'fastify' {
 
 const COOKIE_NAME = 'admin_session';
 
+/**
+ * 解析 admin_session cookie 是否应带 Secure 标志
+ *
+ * 优先级：
+ *   1. 显式 env.ADMIN_COOKIE_SECURE（true/false/1/0/yes/no/on/off，不区分大小写）
+ *   2. 否则按 NODE_ENV 推断：production → true，其余 → false
+ *
+ * 修复场景：Docker 容器内通过 HTTP 直接访问（无 HTTPS 反代）时，
+ *   若 cookie 带 Secure，浏览器会拒绝存储，登录成功后跳转 /admin
+ *   仍因无 cookie 被判未登录，再 302 回 /admin/login，
+ *   表现为"登录后没有任何跳转"。此时显式设 ADMIN_COOKIE_SECURE=false 即可。
+ */
+function shouldUseSecureCookie(): boolean {
+  const raw = env.ADMIN_COOKIE_SECURE.trim().toLowerCase();
+  if (raw !== '') {
+    return ['true', '1', 'yes', 'on'].includes(raw);
+  }
+  return env.NODE_ENV === 'production';
+}
+
 function extractToken(req: any): string | null {
   // 1. Cookie
   const cookie = req.headers.cookie;
@@ -66,7 +86,7 @@ export function buildAdminCookie(token: string, expiresAt: Date): string {
     'SameSite=Strict',
     `Max-Age=${Math.floor((expiresAt.getTime() - Date.now()) / 1000)}`,
   ];
-  if (env.NODE_ENV === 'production') parts.push('Secure');
+  if (shouldUseSecureCookie()) parts.push('Secure');
   if (env.ADMIN_COOKIE_DOMAIN) parts.push(`Domain=${env.ADMIN_COOKIE_DOMAIN}`);
   return parts.join('; ');
 }
@@ -79,7 +99,7 @@ export function buildClearAdminCookie(): string {
     'SameSite=Strict',
     'Max-Age=0',
   ];
-  if (env.NODE_ENV === 'production') parts.push('Secure');
+  if (shouldUseSecureCookie()) parts.push('Secure');
   if (env.ADMIN_COOKIE_DOMAIN) parts.push(`Domain=${env.ADMIN_COOKIE_DOMAIN}`);
   return parts.join('; ');
 }

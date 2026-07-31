@@ -116,6 +116,13 @@ const schema = z.object({
   // 是否启用 Admin 鉴权（false 时降级为 POC 模式无鉴权；生产必须为 true）
   // P2-1 修复：使用 booleanSchema 替代 z.coerce.boolean
   ADMIN_AUTH_ENABLED: booleanSchema.default(true),
+  // Admin 会话 Cookie 是否带 Secure 标志（仅 HTTPS 才能发送）
+  // - 留空（默认）：production 自动启用，development/test 自动禁用（向后兼容）
+  // - 显式设为 true/false（或 1/0、yes/no、on/off）可强制覆盖：
+  //   * Docker 容器内直接 HTTP 访问、且无 HTTPS 反代时设为 false，否则浏览器会拒绝该 cookie，
+  //     导致登录成功后跳转 /admin 时无 cookie 被认为是未登录，又跳回 /admin/login
+  //   * 已有 HTTPS 反代（Nginx/Caddy 终止 TLS）时保持默认即可
+  ADMIN_COOKIE_SECURE: z.string().optional().default(''),
 
   // ===== 第三期 M9：字体许可证管理 =====
   // 是否强制要求字体许可证备注（true 时：注册无 licenseNote 不自动发布；发布前必须设置）
