@@ -12,9 +12,10 @@ prisma/migrations/dev.db*
 dev.db*
 prisma/*.db-journal
 
-# 本地存储
-storage/
-storage-test/
+# 本地存储(运行时数据)
+# 注:必须使用前导 / 限定根目录,否则 storage/ 会误匹配 src/services/storage/ 源码目录
+/storage/
+/storage-test/
 
 # IDE
 .vscode/
