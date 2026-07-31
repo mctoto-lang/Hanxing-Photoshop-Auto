@@ -105,6 +105,11 @@ RUN groupadd --system --gid 1001 psd \
 # 配置 npm 国内镜像源（runner 阶段独立配置）
 RUN npm config set registry https://registry.npmmirror.com
 
+# Prisma 引擎二进制镜像(同 builder 阶段)
+# runner 阶段 npm ci --omit=dev 安装 @prisma/client 时会触发 postinstall 下载引擎,
+# 必须配置镜像源,否则走默认国外源易超时/ECONNRESET
+ENV PRISMA_ENGINES_MIRROR=https://registry.npmmirror.com/-/binary/prisma
+
 # 仅复制生产依赖
 # 强制要求 package-lock.json 必须存在
 COPY package.json package-lock.json ./
