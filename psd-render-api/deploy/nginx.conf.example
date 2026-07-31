@@ -1,0 +1,132 @@
+# PSD 渲染服务平台 - Nginx 反向代理配置示例（第三期 M12）
+#
+# 部署位置：/etc/nginx/conf.d/psd-render-api.conf
+#
+# 功能：
+#   1. HTTPS 终止（Let's Encrypt 证书）
+#   2. HTTP → HTTPS 强制跳转
+#   3. 按调用方 IP 限流（防止恶意刷量）
+#   4. 请求体大小限制（防止超大上传）
+#   5. 超时配置（适配长轮询 claim 接口）
+#
+# 前置条件：
+#   - 已安装 nginx（apt install nginx）
+#   - 已申请 SSL 证书（certbot --nginx -d api.example.com）
+#   - DNS 已解析到本机
+
+# ===== 限流区域定义（放在 http 块，这里供参考）=====
+# 放入 /etc/nginx/nginx.conf 的 http {} 内：
+# limit_req_zone $binary_remote_addr zone=psd_api:10m rate=30r/s;
+# limit_req_zone $binary_remote_addr zone=psd_upload:10m rate=5r/s;
+
+# ===== API 服务（外部调用方使用）=====
+server {
+    listen 80;
+    server_name api.example.com;
+    # HTTP 强制跳转 HTTPS
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name api.example.com;
+
+    # ===== SSL 证书（Let's Encrypt 示例）=====
+    ssl_certificate     /etc/letsencrypt/live/api.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    # ===== 安全头 =====
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    # ===== 请求体大小限制（PSD 上传可能较大，按需调整）=====
+    # 默认 50MB；MAX_INPUT_SIZE_MB=150 时建议设为 200m
+    client_max_body_size 200m;
+
+    # ===== 超时配置（适配长轮询 claim：CLAIM_MAX_WAIT_SECONDS=20）=====
+    # proxy_read_timeout 应大于 claim 最大等待时间
+    proxy_connect_timeout 10s;
+    proxy_send_timeout    60s;
+    proxy_read_timeout    60s;
+
+    # ===== 上游后端（docker-compose api 容器）=====
+    location / {
+        # 限流：每 IP 每秒 30 个请求，突发 60 个
+        limit_req zone=psd_api burst=60 nodelay;
+
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # 关闭缓冲，流式响应（Webhook 投递、长查询场景友好）
+        proxy_buffering off;
+    }
+
+    # ===== 资源上传接口单独限流（更严格）=====
+    location ~ ^/v1/(assets|templates)/upload-url$ {
+        limit_req zone=psd_upload burst=10 nodelay;
+
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # ===== Worker 内部接口（禁止公网访问，仅允许内网/渲染机 IP）=====
+    location /internal/ {
+        # 渲染机 IP 白名单（按实际渲染机公网/内网 IP 调整）
+        allow 10.0.0.0/8;
+        allow 192.168.0.0/16;
+        allow 172.16.0.0/12;
+        deny all;
+
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # Worker 长轮询：read_timeout 需大于 CLAIM_MAX_WAIT_SECONDS
+        proxy_read_timeout 60s;
+    }
+
+    # ===== 健康检查端点（开放给 LB / 监控系统）=====
+    location = /health {
+        proxy_pass http://127.0.0.1:3000;
+        access_log off;
+    }
+}
+
+# ===== Admin UI 服务（仅内网访问，不暴露公网）=====
+# Admin UI 与 API 共用 3000 端口，规范要求仅允许内网访问。
+# 如需通过 Nginx 反向代理（可选），使用以下配置：
+#
+# server {
+#     listen 443 ssl http2;
+#     server_name admin.internal.example.com;
+#
+#     ssl_certificate     /etc/letsencrypt/live/admin.internal.example.com/fullchain.pem;
+#     ssl_certificate_key /etc/letsencrypt/live/admin.internal.example.com/privkey.pem;
+#
+#     # 仅允许内网访问
+#     allow 10.0.0.0/8;
+#     allow 192.168.0.0/16;
+#     deny all;
+#
+#     location / {
+#         proxy_pass http://127.0.0.1:3000;
+#         proxy_set_header Host $host;
+#         proxy_set_header X-Real-IP $remote_addr;
+#         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+#     }
+# }

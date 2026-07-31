@@ -1,0 +1,430 @@
+// PSD 渲染服务平台 - SQLite Schema（第三期改造：生产统一使用 SQLite）
+//
+// 改造历史：
+//   第一期：SQLite POC schema
+//   第二期：新增 PostgreSQL 版本（schema.postgres.prisma），生产用 PG + Redis
+//   第三期改造：回归 SQLite，移除 PostgreSQL/Redis 依赖
+//     原因：项目目标负载为 10-20 任务并发，SQLite WAL 模式 + 内存队列足够，
+//     无需额外有状态服务。运维复杂度从 3 容器降到 1 容器。
+//
+// 本文件为唯一活跃 schema，prisma/migrations/ 中的 SQLite 迁移与之对应。
+// schema.sqlite.prisma 与本文件内容一致，仅作为 switch-db.mjs 切换的源文件保留。
+// schema.postgres.prisma 保留作为未来需要切回 PostgreSQL 时的参考（已不维护）。
+//
+// 启用 SQLite WAL 模式 + busy_timeout 见 src/lib/prisma.ts 的 initSqlitePragmas()
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== API Key（调用方鉴权） ====================
+model ApiKey {
+  id          String   @id @default(cuid())
+  keyPrefix   String   @unique
+  keyHash     String   @unique
+  name        String
+  tenantId    String   @default("default")
+  active      Boolean  @default(true)
+  priority    Int      @default(5)
+  rateLimitPerMin Int?
+  // 第三期 M1：日配额
+  quotaPerDay Int?
+  quotaUsedDay Int     @default(0)
+  quotaResetAt DateTime?
+  // 第三期 M1：作用域（逗号分隔：render:submit,template:read,...）；空表示全部
+  scopes      String   @default("")
+  // 第三期 M1：默认 webhook 配置（API Key 维度）
+  webhookUrlDefault String?
+  webhookSecret String?
+  // 第三期 M1：IP 白名单（逗号分隔；空表示不限制）
+  ipWhitelist String?
+  // 第三期 M1：禁用时间
+  disabledAt  DateTime?
+  createdAt   DateTime @default(now())
+  lastUsedAt  DateTime?
+  jobs        RenderJob[]
+
+  @@index([tenantId, active])
+}
+
+model Template {
+  id        String   @id @default(cuid())
+  code      String   @unique
+  name      String
+  status    String   @default("DRAFT")
+  // P0 安全修复（严重 S2）：租户隔离字段
+  //   原 Template 无 tenantId，任意租户的 API Key 均可修改/发布/查看任意模板。
+  //   新字段默认 "default" 兼容历史数据；新建时按 API Key 的 tenantId 写入，
+  //   外部 API 查询/更新时按 tenantId 过滤；Admin 跨租户管理不受影响。
+  tenantId  String   @default("default")
+  versions  TemplateVersion[]
+  bindings  LayerBinding[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([tenantId])
+}
+
+model TemplateVersion {
+  id            String   @id @default(cuid())
+  code          String   @unique
+  template      Template @relation(fields: [templateId], references: [id])
+  templateId    String
+  version       Int      @default(1)
+  psdObjectKey  String
+  psdSha256     String
+  canvasWidth   Int?
+  canvasHeight  Int?
+  layerSchema   String
+  layerTree     String
+  psMinVersion  String   @default("25.0")
+  // 第三期 M8：缩略图对象 key（PSD 解析时生成的预览图）
+  thumbnailObjectKey String?
+  published     Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  jobs          RenderJob[]
+
+  @@unique([templateId, version])
+  @@index([templateId, published])
+}
+
+model LayerBinding {
+  id              String   @id @default(cuid())
+  template        Template @relation(fields: [templateId], references: [id])
+  templateId      String
+  bindingId       String
+  layerId         Int
+  layerPath       String
+  type            String
+  required        Boolean  @default(true)
+  label           String?
+  acceptedFormats String   @default("jpg,png,jpeg")
+  fit             String?
+  maxLength       Int?
+  defaultFontVersionId String?
+  createdAt       DateTime @default(now())
+
+  @@unique([templateId, bindingId])
+  @@index([templateId])
+}
+
+model FontVersion {
+  id              String   @id @default(cuid())
+  code            String   @unique
+  familyName      String
+  postscriptName  String
+  style           String   @default("Regular")
+  fileObjectKey   String
+  sha256          String
+  licenseNote     String?
+  published       Boolean  @default(true)
+  createdAt       DateTime @default(now())
+
+  @@unique([postscriptName, style])
+  @@index([familyName])
+}
+
+model Worker {
+  id                  String   @id @default(cuid())
+  code                String   @unique
+  customCode          String?  @unique
+  displayName         String?
+  machineFingerprint  String   @unique
+  psVersion           String
+  capabilities        String   @default("[]")
+  fontInventoryHash   String?
+  // P0：accessToken 仅在注册/刷新时返回明文，DB 存其 SHA-256 hash
+  accessToken         String?
+  accessTokenHash     String?  @unique
+  tokenExpiresAt      DateTime?
+  sessionActive       Boolean  @default(false)
+  currentJobId        String?
+  lastHeartbeatAt     DateTime?
+  offlineSince        DateTime?
+  psMajorVersion      Int      @default(0)
+  os                  String   @default("unknown")
+  registeredAt        DateTime @default(now())
+
+  // ===== 第四期 M9：Worker 硬件画像（注册时上报，Admin 详情可查看） =====
+  // 设备主机名（如 DESKTOP-ABC123）
+  hostname            String?
+  // CPU 型号（如 "Intel Core i7-12700K"）
+  cpuModel            String?
+  // CPU 物理核心数
+  cpuCores            Int?
+  // CPU 逻辑核心数（含超线程）
+  cpuLogicalCores     Int?
+  // CPU 主频（MHz，如 3600）
+  cpuClockMhz         Int?
+  // 显卡型号（如 "NVIDIA GeForce RTX 4060"）；多卡用 `;` 分隔
+  gpuModel            String?
+  // 显卡显存（MB）
+  gpuVramMb           Int?
+  // 物理内存总量（MB）
+  totalMemoryMb       Int?
+  // 可用内存（MB，注册时刻）
+  availableMemoryMb   Int?
+  // 操作系统版本（如 "Windows 11 Pro 23H2"）
+  osVersion           String?
+  // Worker 上报的 IP（注册请求的 X-Forwarded-For / req.ip）
+  registeredIp       String?
+  // 磁盘总量（MB，安装 PS 的盘）
+  diskTotalMb         Int?
+  // 磁盘可用空间（MB）
+  diskFreeMb          Int?
+  // 完整硬件画像 JSON（包含未来扩展字段，避免 schema 频繁迁移）
+  hardwareInfo        String?
+
+  jobs                RenderJob[]
+  heartbeats          JobHeartbeat[]
+
+  @@index([sessionActive])
+  @@index([lastHeartbeatAt])
+}
+
+// Worker 一次性注册令牌（配对码模式）
+//   管理员在 Admin UI 生成配对码，Worker UI 输入 6 位配对码完成首次注册。
+//   配对码与完整 token 都是一次性使用，注册成功后标记 usedAt。
+//   兼容旧模式：WORKER_REGISTER_SECRET 长期密钥仍可作为 fallback。
+model WorkerBootstrapToken {
+  id              String   @id @default(cuid())
+  // 6 位配对码（如 K9F-2X7），明文存储，用于 Worker UI 输入
+  pairingCode     String   @unique
+  // 完整 token（64 字符 hex），SHA-256 hash 存储，作为 registerSecret 携带到后端
+  tokenHash       String   @unique
+  // 创建该令牌的管理员用户名
+  createdBy       String
+  createdAt       DateTime @default(now())
+  // 配对码有效期（默认 24h），过期后不可用
+  expiresAt       DateTime
+  // 首次使用时间（注册成功后标记）
+  usedAt          DateTime?
+  // 首次使用的 Worker ID（绑定后不可复用）
+  usedByWorkerId  String?
+  // 管理员作废时间
+  revokedAt       DateTime?
+  // 备注（如"给上海渲染机 A"）
+  note            String?
+
+  @@index([expiresAt])
+  @@index([usedAt])
+}
+
+model StorageConfig {
+  id                    Int      @id @default(1)
+  backend               String   @default("local")
+  localStorageDir       String?
+  cosBucket             String?
+  cosRegion             String?
+  cosInternalDomain     String?
+  cosPresignExpiresSec  Int?
+  cosSecretIdEncrypted  String?
+  cosSecretKeyEncrypted String?
+  updatedAt             DateTime @updatedAt
+}
+
+model RenderJob {
+  id                String   @id @default(cuid())
+  code              String   @unique
+  idempotencyKey    String
+  tenantId          String   @default("default")
+  apiKey            ApiKey?  @relation(fields: [apiKeyId], references: [id])
+  apiKeyId          String?
+  templateVersion   TemplateVersion @relation(fields: [templateVersionId], references: [id])
+  templateVersionId String
+  inputJson         String
+  outputFormat      String   @default("png")
+  status            String   @default("QUEUED")
+  priority          Int      @default(5)
+  attempt           Int      @default(0)
+  maxAttempts       Int      @default(3)
+  requiredCapabilities String?
+  targetWorkerId    String?
+  cancelRequestedAt DateTime?
+  cancelReason      String?
+  cancelledAt       DateTime?
+  worker            Worker?  @relation(fields: [workerId], references: [id])
+  workerId          String?
+  leaseToken        String?
+  leaseExpiresAt    DateTime?
+  stage             String?
+  progress          Int      @default(0)
+  errorCode         String?
+  errorMessage      String?
+  traceId           String?
+  webhookUrl        String?
+  webhookDelivered  Boolean  @default(false)
+  queuedAt          DateTime @default(now())
+  leasedAt          DateTime?
+  processingAt      DateTime?
+  succeededAt       DateTime?
+  failedAt          DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  artifacts         Artifact[]
+  heartbeats        JobHeartbeat[]
+
+  @@unique([tenantId, idempotencyKey])
+  @@index([status, priority, queuedAt])
+  @@index([workerId])
+  @@index([targetWorkerId])
+  @@index([cancelRequestedAt])
+}
+
+model JobHeartbeat {
+  id        String   @id @default(cuid())
+  job       RenderJob @relation(fields: [jobId], references: [id])
+  jobId     String
+  worker    Worker?  @relation(fields: [workerId], references: [id])
+  workerId  String?
+  stage     String?
+  progress  Int      @default(0)
+  message   String?
+  createdAt DateTime @default(now())
+
+  @@index([jobId, createdAt])
+}
+
+model Artifact {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  job         RenderJob? @relation(fields: [jobId], references: [id])
+  jobId       String?
+  kind        String
+  objectKey   String
+  sha256      String
+  mimeType    String
+  sizeBytes   Int      @default(0)
+  bindingId   String?
+  originalName String?
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+  // P0 安全修复（高危7）：租户隔离字段
+  //   原 Artifact 无 tenantId，租户 A 可在提交任务时使用租户 B 的 assetId（仅凭 code）
+  //   访问他人上传的图片。新字段默认 "default" 兼容历史数据；新建时按 API Key 的
+  //   tenantId 写入，查询时按 tenantId 过滤。
+  tenantId    String   @default("default")
+
+  @@index([jobId, kind])
+  @@index([expiresAt])
+  @@index([tenantId])
+}
+
+model WebhookLog {
+  id          String   @id @default(cuid())
+  // 幂等事件 ID：{jobId}.{event}（同一任务同一事件仅投递一次）
+  eventId     String   @unique
+  jobId       String
+  // 事件类型：job.succeeded | job.failed | job.cancelled
+  event       String
+  targetUrl   String
+  // 关联的 API Key（用于取 webhookSecret）
+  apiKeyId    String?
+  // 完整 payload（JSON 字符串）
+  payload     String
+  // PENDING | DELIVERED | FAILED | RETRYING
+  status      String   @default("PENDING")
+  attempt     Int      @default(0)
+  maxAttempts Int      @default(6)
+  // 下次重试时间（指数退避）
+  nextAttemptAt DateTime?
+  responseCode Int?
+  responseBody String?
+  lastError   String?
+  deliveredAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([jobId])
+  @@index([status, nextAttemptAt])
+  @@index([createdAt])
+}
+
+model AlertEvent {
+  id          String   @id @default(cuid())
+  type        String
+  severity    String   @default("WARN")
+  refType     String?
+  refId       String?
+  title       String
+  message     String
+  metrics     String?
+  status      String   @default("ACTIVE")
+  triggeredAt DateTime @default(now())
+  resolvedAt  DateTime?
+  ackedBy     String?
+  ackedAt     DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([type, status])
+  @@index([triggeredAt])
+}
+
+// ==================== 管理员用户与 Session（第三期 M3） ====================
+model AdminUser {
+  id            String   @id @default(cuid())
+  username      String   @unique
+  passwordHash  String
+  // admin | operator | viewer
+  role          String   @default("viewer")
+  active        Boolean  @default(true)
+  lastLoginAt   DateTime?
+  lastLoginIp   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  sessions      AdminSession[]
+
+  @@index([active])
+}
+
+model AdminSession {
+  id            String   @id @default(cuid())
+  // P0 安全修复：token 明文仅在创建时返回给客户端，DB 不再落明文，仅存 SHA-256 hash。
+  //   旧字段 token 改为可空，仅用于历史数据兼容；新会话不写入。
+  //   防止 DB 泄露时攻击者直接读取 token 列冒充任意管理员。
+  token         String?  @unique
+  tokenHash     String   @unique
+  adminUser     AdminUser @relation(fields: [adminUserId], references: [id])
+  adminUserId   String
+  expiresAt     DateTime
+  ip            String?
+  userAgent     String?
+  createdAt     DateTime @default(now())
+
+  @@index([adminUserId])
+  @@index([expiresAt])
+}
+
+// ==================== 审计日志（第三期 M2） ====================
+model AuditLog {
+  id          String   @id @default(cuid())
+  // 动作类别：admin_login | admin_logout | api_key_create | api_key_rotate | api_key_disable | api_key_enable | api_key_delete | api_key_update | template_publish | template_archive | template_unarchive | template_delete | font_publish | font_unpublish | font_license_note | font_delete | font_upload | worker_force_offline | worker_reapprove | worker_display_name_update | worker_custom_code_update | worker_delete | job_force_cancel | job_release_lease | job_retry | job_batch_cancel | admin_user_create | admin_user_disable | admin_user_enable | admin_user_password | admin_user_role
+  action      String
+  // 执行者：admin username 或 'system' / 'unknown'
+  actor       String
+  actorIp     String?
+  actorUa     String?
+  // 结果：success | failure
+  result      String   @default("success")
+  // 关联资源类型：api_key | template | font | worker | job | admin_user | alert | system
+  refType     String?
+  refId       String?
+  // 简短描述
+  message     String?
+  // 详细元数据（JSON 字符串）
+  meta        String   @default("{}")
+  createdAt   DateTime @default(now())
+
+  @@index([action, createdAt])
+  @@index([actor, createdAt])
+  @@index([refType, refId])
+  @@index([createdAt])
+}

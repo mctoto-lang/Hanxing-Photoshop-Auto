@@ -1,0 +1,70 @@
+# PSD 渲染服务平台 - 生产部署编排（第三期改造：纯 SQLite + 内存队列）
+#
+# 改造说明：
+#   - 移除 PostgreSQL 容器，改用 SQLite 文件（挂载到 /data 卷）
+#   - 移除 Redis 容器，改用内存队列（10-20 任务并发场景足够）
+#   - 部署从 3 容器（api + postgres + redis）简化为 1 容器
+#   - 备份从 "pg_dump + Redis 快照" 简化为 "复制 /data/psd-render.db"
+#
+# 启动方式：
+#   1. 复制 .env.example 为 .env，按生产环境填写
+#   2. docker compose up -d
+#   3. 首次启动会自动执行 prisma migrate deploy（创建 SQLite 表结构）
+#
+# 安全建议（P0-4 已在 compose 内强制）：
+#   - API 端口仅 127.0.0.1 监听，必须由前置 Nginx/网关转发（处理 HTTPS 与限流）
+#   - Admin UI 与 API 共用 3000 端口，通过 /admin 路径访问
+#   - COS 使用内网域名（cos.ap-guangzhou.myqcloud.com），免公网流量费
+#   - 生产环境必须修改 ADMIN_BOOTSTRAP_PASSWORD 和 API_KEY
+
+services:
+  # ===== PSD 渲染后端 API（单容器，含 SQLite + 内存队列） =====
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: psd-render-api:latest
+    restart: unless-stopped
+    # P0-4：API 端口仅绑定 127.0.0.1，必须由前置 Nginx/网关转发
+    # 直接公网暴露会绕过 HTTPS、限流、WAF 等防护层
+    # Admin UI 通过同一端口的 /admin 路径访问
+    ports:
+      - "127.0.0.1:3000:3000"
+    env_file:
+      - .env
+    environment:
+      # 生产环境强制覆盖项
+      NODE_ENV: production
+      # 第三期改造：SQLite 数据文件路径（挂载到 /data 卷）
+      #   WAL 模式下会同时产生 psd-render.db-wal 与 psd-render.db-shm 文件
+      DATABASE_URL: "file:/data/psd-render.db"
+      # 第三期改造：内存队列（移除 Redis 依赖）
+      QUEUE_BACKEND: memory
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+    volumes:
+      # SQLite 数据卷（数据库文件 + WAL 文件）
+      - api-data:/data
+      # local 存储后端时挂载数据卷；cos 后端时此挂载无害
+      - api-storage:/app/storage
+      - api-logs:/app/logs
+    networks:
+      - psd-net
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health/live').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  # SQLite 数据文件卷（备份：docker run --rm -v psd-render-api_api-data:/data alpine tar czf - -C /data . > backup.tar.gz）
+  api-data:
+    driver: local
+  api-storage:
+    driver: local
+  api-logs:
+    driver: local
+
+networks:
+  psd-net:
+    driver: bridge

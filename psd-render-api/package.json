@@ -1,0 +1,52 @@
+{
+  "name": "psd-render-api",
+  "version": "0.3.0",
+  "private": true,
+  "description": "PSD 模板渲染服务平台后端（第三期 M12：Admin UI / 审计 / 告警 / Webhook / 字体许可）",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:deploy": "prisma migrate deploy",
+    "prisma:studio": "prisma studio",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test src/**/*.test.ts",
+    "verify": "tsx scripts/verify-poc.ts",
+    "verify:smoke": "tsx scripts/verify-poc.ts --skip-psd-parse",
+    "verify:phase2": "tsx scripts/verify-phase2.ts"
+  },
+  "dependencies": {
+    "@fastify/cors": "^9.0.1",
+    "@fastify/multipart": "^8.3.0",
+    "@fastify/static": "^7.0.4",
+    "@fastify/swagger": "^8.15.0",
+    "@fastify/swagger-ui": "^3.1.0",
+    "@prisma/client": "^5.18.0",
+    "bcryptjs": "^2.4.3",
+    "cos-nodejs-sdk-v5": "^2.14.4",
+    "dotenv": "^16.4.5",
+    "fastify": "^4.28.1",
+    "fastify-plugin": "^4.5.1",
+    "file-type": "^19.4.0",
+    "fontkit": "^2.0.2",
+    "pino": "^9.4.0",
+    "pino-pretty": "^11.2.2",
+    "psd": "^3.1.0",
+    "prisma": "^5.18.0",
+    "sharp": "^0.33.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^22.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
