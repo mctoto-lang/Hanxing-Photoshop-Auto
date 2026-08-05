@@ -189,20 +189,20 @@ model Worker {
   @@index([lastHeartbeatAt])
 }
 
-// Worker 一次性注册令牌（配对码模式）
-//   管理员在 Admin UI 生成配对码，Worker UI 输入 6 位配对码完成首次注册。
-//   配对码与完整 token 都是一次性使用，注册成功后标记 usedAt。
+// Worker 一次性注册令牌（授权码模式）
+//   管理员在 Admin UI 生成授权码，Worker UI 输入 6 位授权码完成首次激活连接。
+//   授权码与完整 token 都是一次性使用，注册成功后标记 usedAt。
 //   兼容旧模式：WORKER_REGISTER_SECRET 长期密钥仍可作为 fallback。
 model WorkerBootstrapToken {
   id              String   @id @default(cuid())
-  // 6 位配对码（如 K9F-2X7），明文存储，用于 Worker UI 输入
+  // 6 位授权码（如 K9F-2X7），明文存储，用于 Worker UI 输入
   pairingCode     String   @unique
   // 完整 token（64 字符 hex），SHA-256 hash 存储，作为 registerSecret 携带到后端
   tokenHash       String   @unique
   // 创建该令牌的管理员用户名
   createdBy       String
   createdAt       DateTime @default(now())
-  // 配对码有效期（默认 24h），过期后不可用
+  // 授权码有效期（默认 24h），过期后不可用
   expiresAt       DateTime
   // 首次使用时间（注册成功后标记）
   usedAt          DateTime?
@@ -225,6 +225,11 @@ model StorageConfig {
   cosRegion             String?
   cosInternalDomain     String?
   cosPresignExpiresSec  Int?
+  // manifest（任务下载/上传预签名 URL）有效期（秒）。
+  //   原 job-service 用 LEASE_TTL_SECONDS*3（=270s）作有效期，但带蒙版智能对象
+  //   渲染 JSX 耗时 271~286s 会踩线导致上传 URL 过期（403 Request has expired）。
+  //   独立配置项默认 600s，可在 Admin UI 调整，需大于 JSX 最长执行时间。
+  manifestUrlExpiresSec Int?
   cosSecretIdEncrypted  String?
   cosSecretKeyEncrypted String?
   updatedAt             DateTime @updatedAt
@@ -245,6 +250,7 @@ model RenderJob {
   priority          Int      @default(5)
   attempt           Int      @default(0)
   maxAttempts       Int      @default(3)
+  jsxTimeoutSeconds Int      @default(600)
   requiredCapabilities String?
   targetWorkerId    String?
   cancelRequestedAt DateTime?

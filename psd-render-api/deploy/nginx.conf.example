@@ -46,8 +46,9 @@ server {
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 
     # ===== 请求体大小限制（PSD 上传可能较大，按需调整）=====
-    # 默认 50MB；MAX_INPUT_SIZE_MB=150 时建议设为 200m
-    client_max_body_size 200m;
+    # 默认 50MB；MAX_PSD_SIZE_MB=300（PSD 模板）时建议 ≥400m，留 100MB 余量
+    # MAX_INPUT_SIZE_MB=150（输入资产）仍由后端按 objectKey 前缀兜底
+    client_max_body_size 400m;
 
     # ===== 超时配置（适配长轮询 claim：CLAIM_MAX_WAIT_SECONDS=20）=====
     # proxy_read_timeout 应大于 claim 最大等待时间

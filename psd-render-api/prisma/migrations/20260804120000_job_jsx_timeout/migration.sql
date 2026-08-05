@@ -1,0 +1,1 @@
+ALTER TABLE "RenderJob" ADD COLUMN "jsxTimeoutSeconds" INTEGER NOT NULL DEFAULT 600;

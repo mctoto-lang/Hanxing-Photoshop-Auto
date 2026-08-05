@@ -69,17 +69,17 @@ function isLoopbackIp(ip: string): boolean {
  * 校验 Worker 注册凭据
  *
  * 支持两种凭据（优先级从高到低）：
- *   1. 一次性配对码 / 一次性完整 token（bootstrapTokenService 校验，用后即焚）
+ *   1. 一次性授权码 / 一次性完整 token（bootstrapTokenService 校验，用后即焚）
  *   2. 长期密钥 WORKER_REGISTER_SECRET（恒定时间比较，兼容旧 Worker）
  *
  * P0 高危修复（H1）：原实现在 dev 模式未配置密钥时完全开放注册，
  *   若 dev 环境误暴露公网，任意人都可注册恶意 Worker 窃取任务素材。
  *   现改为：未配置密钥时仅允许 loopback IP 注册，非本地请求必须携带密钥。
- *   - 生产环境：必须携带配对码/token 或长期密钥
+ *   - 生产环境：必须携带授权码/token 或长期密钥
  *   - 开发环境且未配置密钥：仅允许 loopback（127.0.0.1 / ::1）放行
  *   - 开发环境且已配置密钥：与生产一致
  *
- * @returns tokenId 如果通过配对码/token 校验，返回 token id 用于后续绑定 Worker；长期密钥或 loopback 返回 null
+ * @returns tokenId 如果通过授权码/token 校验，返回 token id 用于后续绑定 Worker；长期密钥或 loopback 返回 null
  */
 async function verifyRegisterCredential(req: any, reply: any): Promise<string | null> {
   const auth = req.headers.authorization;
@@ -87,7 +87,7 @@ async function verifyRegisterCredential(req: any, reply: any): Promise<string | 
     auth?.startsWith('Bearer ') ? auth.slice(7).trim() :
     (req.headers['x-worker-register-secret'] as string)?.trim() ?? '';
 
-  // 1. 优先校验一次性配对码 / token
+  // 1. 优先校验一次性授权码 / token
   if (provided) {
     const tokenInfo = await bootstrapTokenService.verifyAndConsume(provided);
     if (tokenInfo) {
@@ -119,7 +119,7 @@ async function verifyRegisterCredential(req: any, reply: any): Promise<string | 
   if (!isLoopbackIp(ip)) {
     reply.code(401).send({
       error: 'UNAUTHORIZED',
-      message: '未配置 WORKER_REGISTER_SECRET 时仅允许本机注册，请配置该密钥或使用配对码',
+      message: '未配置 WORKER_REGISTER_SECRET 时仅允许本机注册，请配置该密钥或使用授权码',
     });
     return null;
   }
@@ -138,7 +138,7 @@ export async function workerRoutes(app: FastifyInstance) {
       headers: {
         type: 'object',
         properties: {
-          'Authorization': { type: 'string', description: 'Bearer <WORKER_REGISTER_SECRET> 或一次性配对码/token' },
+          'Authorization': { type: 'string', description: 'Bearer <WORKER_REGISTER_SECRET> 或一次性授权码/token' },
           'X-Worker-Register-Secret': { type: 'string', description: '备选：注册密钥头' },
         },
       },
@@ -209,7 +209,7 @@ export async function workerRoutes(app: FastifyInstance) {
     }
     // 第四期 M9：透传注册请求的 IP（trustProxy=true 时已解析 X-Forwarded-For）
     const result = await workerService.register(parsed.data, { registeredIp: req.ip ?? null });
-    // 如果通过配对码注册，绑定 Worker ID 到 token 记录
+    // 如果通过授权码注册，绑定 Worker ID 到 token 记录
     if (tokenId) {
       await bootstrapTokenService.bindWorker(tokenId, result.workerId);
     }
@@ -268,7 +268,7 @@ export async function workerRoutes(app: FastifyInstance) {
           required: ['jobId', 'jobCode', 'leaseToken', 'leaseExpiresAt', 'manifest'],
           properties: {
             jobId: { type: 'string', description: '任务内部 ID' },
-            jobCode: { type: 'string', description: '任务编号（PSD_YYMMDD_NNNN 格式，用于 job 文件夹命名）' },
+            jobCode: { type: 'string', description: '任务编号（job_xxx 格式，与 genJobCode 一致，Worker 用作 job 文件夹命名）' },
             leaseToken: { type: 'string', description: '租约令牌（心跳/完成/失败时需携带）' },
             leaseExpiresAt: { type: 'string', format: 'date-time', description: '租约过期时间' },
             // P0 修复：fast-json-stringify 对 { type: 'object' } 无 properties 的 schema

@@ -33,6 +33,9 @@ const failSchema = z.object({
     'INVALID_INPUT_ASSET',
     'WORKER_LOST',
     'JOB_CANCELLED',
+    'INVALID_LAYER_BINDING',
+    'LEASE_LOST',
+    'COMPLETE_REPORT_FAILED',
   ]),
   errorMessage: z.string().min(1),
   stage: z.string().optional(),
@@ -210,8 +213,8 @@ export async function jobInternalRoutes(app: FastifyInstance) {
           },
         },
         401: { $ref: 'ErrorResponse#', description: 'Worker 令牌无效' },
-        404: { $ref: 'ErrorResponse#', description: '任务不存在' },
-        409: { $ref: 'ErrorResponse#', description: '任务状态冲突' },
+        // 注：service 在 job 不存在或 workerId 不匹配时统一返回 200 + { cancelled: false, status: 'UNKNOWN' }，
+        // 避免向非持有方泄露任务存在性与状态，故不声明 404/409。
       },
     },
   }, async (req, reply) => {

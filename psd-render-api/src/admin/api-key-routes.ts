@@ -251,16 +251,10 @@ export async function apiKeyRoutes(app: FastifyInstance) {
           rateLimitPerMin: { type: 'integer', minimum: 1, nullable: true, description: '每分钟限流（null 表示不限流）' },
           quotaPerDay: { type: 'integer', minimum: 1, nullable: true, description: '每日配额（null 表示不限配额）' },
           scopes: { type: 'array', items: { type: 'string', minLength: 1, maxLength: 64 }, description: '权限 scopes 列表' },
-          webhookUrlDefault: {
-            type: 'object',
-            nullable: true,
-            description: '默认 Webhook 配置（url/events/enabled）',
-            properties: {
-              url: { type: 'string' },
-              events: { type: 'array', items: { type: 'string' } },
-              enabled: { type: 'boolean' },
-            },
-          },
+          // C6 修复：webhookUrlDefault 类型与 zod updateSchema 中的 webhookUrlDefaultSchema
+          //   (z.string().url()) 保持一致，并和 POST /admin/api/api-keys 中的同名字段统一为 string。
+          //   原错误声明为 object，导致客户端按文档传 object 会被 zod 拒绝（400 VALIDATION_ERROR）。
+          webhookUrlDefault: { type: 'string', format: 'uri', nullable: true, description: '默认 Webhook URL（需通过 SSRF 静态校验；null 表示清除）' },
           webhookSecret: { type: 'string', maxLength: 256, nullable: true, description: 'Webhook 签名密钥' },
           ipWhitelist: { type: 'string', maxLength: 1024, nullable: true, description: 'IP 白名单（CIDR 逗号分隔）' },
         },

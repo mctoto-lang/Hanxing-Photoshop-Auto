@@ -12,6 +12,7 @@ import { prisma } from '../../lib/prisma.js';
 import { genArtifactCode } from '../../lib/crypto.js';
 import { env } from '../../config/env.js';
 import { Errors } from '../../lib/errors.js';
+import { sha256 } from '../../lib/crypto.js';
 
 const ALLOWED_MIME = new Set([
   'image/jpeg',
@@ -129,6 +130,51 @@ export async function assetsRoutes(app: FastifyInstance) {
       objectKey: up.objectKey,
       expiresAt: up.expiresAt,
     });
+  });
+
+  app.post('/v1/assets/:assetId/complete', {
+    preHandler: [app.authenticateApiKey],
+    schema: {
+      tags: ['assets'],
+      summary: '确认资产上传完成',
+      description: '客户端通过 `POST /v1/assets/upload-url` 拿到预签名地址并 PUT 上传完成后，调用本接口回填实际 sha256/sizeBytes/mime。\n\n服务端会校验：\n- 资产存在且属于当前租户（jobId 为 null，即未被任何任务占用）\n- 存储中对象已存在（HEAD 检查）\n- 大小不超过 `MAX_INPUT_SIZE_MB`\n\n校验通过后将资产标记为可用，提交渲染任务时即可在 `input.{bindingId}.assetId` 引用。\n\n注意：资产不存在 / 未上传完成 / 大小超限 / 已被其他任务使用 等情况均统一返回 422 `INVALID_INPUT_ASSET`，详见各响应描述。',
+      security: [{ apiKey: [] }],
+      params: { type: 'object', required: ['assetId'], properties: { assetId: { type: 'string', description: '资产编码（art_xxx），由 upload-url 接口返回' } } },
+      response: {
+        200: {
+          type: 'object',
+          description: '回填成功，返回资产的实际 sha256 与字节数',
+          required: ['assetId', 'sha256', 'sizeBytes'],
+          properties: {
+            assetId: { type: 'string', description: '资产编码（art_xxx）' },
+            sha256: { type: 'string', description: '资产实际 SHA-256（hex）' },
+            sizeBytes: { type: 'integer', description: '资产实际字节数' },
+          },
+        },
+        401: { $ref: 'ErrorResponse#', description: 'API Key 无效或缺少 tenantId' },
+        403: { $ref: 'ErrorResponse#', description: 'IP 白名单拒绝 / 作用域不足' },
+        422: { $ref: 'ErrorResponse#', description: 'INVALID_INPUT_ASSET：资产不存在/不属于当前租户/未上传完成/大小不符限制/已被其他任务使用' },
+        429: { $ref: 'ErrorResponse#', description: '触发限流或日配额耗尽' },
+      },
+    },
+  }, async (req, reply) => {
+    const tenantId = req.user?.tenantId;
+    const assetId = (req.params as { assetId: string }).assetId;
+    const artifact = await prisma.artifact.findFirst({ where: { code: assetId, tenantId, kind: 'input', jobId: null } });
+    if (!artifact) throw Errors.invalidInputAsset('资产不存在或不属于当前租户');
+    const storage = await getStorage();
+    const meta = await storage.headObject(artifact.objectKey);
+    if (!meta) throw Errors.invalidInputAsset('资产尚未上传完成');
+    if (meta.size <= 0 || meta.size > env.MAX_INPUT_SIZE_MB * 1024 * 1024) {
+      throw Errors.invalidInputAsset('资产大小不符合限制');
+    }
+    const digest = meta.sha256 ?? sha256(await storage.getObject(artifact.objectKey));
+    const updated = await prisma.artifact.updateMany({
+      where: { id: artifact.id, jobId: null },
+      data: { sha256: digest, sizeBytes: meta.size, mimeType: meta.mimeType },
+    });
+    if (updated.count !== 1) throw Errors.invalidInputAsset('资产已被其他任务使用');
+    return reply.send({ assetId, sha256: digest, sizeBytes: meta.size });
   });
 }
 

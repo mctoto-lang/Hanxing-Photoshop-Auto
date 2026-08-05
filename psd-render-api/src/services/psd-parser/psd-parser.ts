@@ -30,10 +30,20 @@ import { Worker } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { logger } from '../../lib/logger.js';
+import { Semaphore } from '../../lib/semaphore.js';
+import { env, psdParseTimeoutMs, psdParseConcurrency } from '../../config/env.js';
 import type { LayerNode, LayerTreeResult } from '../../types/index.js';
 
 // worker 脚本路径（编译后 dist/services/psd-parser/psd-worker.js）
 const WORKER_PATH = fileURLToPath(new URL('./psd-worker.js', import.meta.url));
+
+/**
+ * PSD 解析并发信号量：限制同时运行的 worker_threads 数量。
+ * 单次 300MB PSD 解析峰值内存 ~1.2-1.5GB（body+readFile+worker 解码），
+ * 不限并发时 N 个大文件同时解析会把主进程内存打爆。由 env.PSD_PARSE_CONCURRENCY 控制。
+ * parse() 与 generateThumbnail() 各自 acquire/release，限制"同时运行的 worker 数"。
+ */
+const parseSemaphore = new Semaphore(psdParseConcurrency);
 
 export interface ParseOptions {
   templateId: string;
@@ -63,8 +73,15 @@ function runInWorker(req: {
   maxWidth?: number;
 }): Promise<WorkerResponse> {
   return new Promise((resolve) => {
-    const worker = new Worker(WORKER_PATH);
-    const timeoutMs = 60_000;
+    // resourceLimits：限制 worker 老生代堆上限，按 PSD 文件限额的 5 倍预留（下限 1024MB）。
+    //   PSD 解析需把整份文件读入内存 + ag-psd 解码工作集，大文件易触限。
+    //   worker 触限会被 terminate，下面的 'error' 处理器捕获后返回 422，主进程不受影响。
+    const worker = new Worker(WORKER_PATH, {
+      resourceLimits: {
+        maxOldGenerationSizeMb: Math.max(1024, env.MAX_PSD_SIZE_MB * 5),
+      },
+    });
+    const timeoutMs = psdParseTimeoutMs;
     const timer = setTimeout(() => {
       worker.terminate().catch(() => {});
       resolve({ ok: false, error: `PSD 解析超时（${timeoutMs}ms）`, name: 'PsdTimeoutError' });
@@ -98,41 +115,46 @@ export class PsdParserService {
    * @returns PNG 缩略图 Buffer（最大宽 320，保持纵横比）；若 PSD 无内嵌预览返回 null
    */
   async generateThumbnail(opts: { filePath: string; maxWidth?: number }): Promise<Buffer | null> {
-    logger.info({ msg: '开始生成 PSD 缩略图（worker）', file: path.basename(opts.filePath) });
+    const release = await parseSemaphore.acquire();
+    try {
+      logger.info({ msg: '开始生成 PSD 缩略图（worker）', file: path.basename(opts.filePath) });
 
-    const resp = await runInWorker({
-      type: 'thumbnail',
-      filePath: opts.filePath,
-      maxWidth: opts.maxWidth ?? 640,
-    });
-
-    if (!resp.ok) {
-      logger.warn({
-        msg: 'PSD 缩略图生成失败',
-        file: path.basename(opts.filePath),
-        error: resp.error,
+      const resp = await runInWorker({
+        type: 'thumbnail',
+        filePath: opts.filePath,
+        maxWidth: opts.maxWidth ?? 800,
       });
-      // 缩略图失败不阻断主流程，返回 null
-      return null;
-    }
 
-    if (resp.thumbnail) {
-      // Worker 通过 postMessage 结构化克隆传输数据，Buffer 子类信息会丢失，
-      // 主线程接收到的是 Uint8Array 而非 Buffer。下游 storage.putObject 在
-      // Buffer.isBuffer 校验失败时会走流式分支，按字节迭代 Uint8Array 会导致
-      // Buffer.from(number) 抛错（如 "Received type number (137)"，0x89 为 PNG 首字节）。
-      // 这里统一转换为真正的 Buffer 再返回。
-      const buf = Buffer.isBuffer(resp.thumbnail)
-        ? resp.thumbnail
-        : Buffer.from(resp.thumbnail as Uint8Array);
-      logger.info({
-        msg: 'PSD 缩略图已生成',
-        thumbnailSize: buf.length,
-      });
-      return buf;
-    } else {
-      logger.warn({ msg: 'PSD 无内嵌预览图，跳过缩略图生成', file: path.basename(opts.filePath) });
-      return null;
+      if (!resp.ok) {
+        logger.warn({
+          msg: 'PSD 缩略图生成失败',
+          file: path.basename(opts.filePath),
+          error: resp.error,
+        });
+        // 缩略图失败不阻断主流程，返回 null
+        return null;
+      }
+
+      if (resp.thumbnail) {
+        // Worker 通过 postMessage 结构化克隆传输数据，Buffer 子类信息会丢失，
+        // 主线程接收到的是 Uint8Array 而非 Buffer。下游 storage.putObject 在
+        // Buffer.isBuffer 校验失败时会走流式分支，按字节迭代 Uint8Array 会导致
+        // Buffer.from(number) 抛错（如 "Received type number (137)"，0x89 为 PNG 首字节）。
+        // 这里统一转换为真正的 Buffer 再返回。
+        const buf = Buffer.isBuffer(resp.thumbnail)
+          ? resp.thumbnail
+          : Buffer.from(resp.thumbnail as Uint8Array);
+        logger.info({
+          msg: 'PSD 缩略图已生成',
+          thumbnailSize: buf.length,
+        });
+        return buf;
+      } else {
+        logger.warn({ msg: 'PSD 无内嵌预览图，跳过缩略图生成', file: path.basename(opts.filePath) });
+        return null;
+      }
+    } finally {
+      release();
     }
   }
 
@@ -140,32 +162,39 @@ export class PsdParserService {
    * 解析 PSD 并提取图层树
    *
    * B-H5：在 worker_threads 中执行 psd.parse()，避免阻塞主线程事件循环。
+   * 通过 parseSemaphore 限制并发解析数（env.PSD_PARSE_CONCURRENCY），防止
+   *   多个大 PSD 同时解析导致主进程内存耗尽。
    */
   async parse(opts: ParseOptions): Promise<LayerTreeResult> {
-    logger.info({ msg: '开始解析 PSD（worker）', file: path.basename(opts.filePath) });
+    const release = await parseSemaphore.acquire();
+    try {
+      logger.info({ msg: '开始解析 PSD（worker）', file: path.basename(opts.filePath) });
 
-    const resp = await runInWorker({
-      type: 'parse',
-      filePath: opts.filePath,
-      templateId: opts.templateId,
-      templateVersionId: opts.templateVersionId,
-    });
+      const resp = await runInWorker({
+        type: 'parse',
+        filePath: opts.filePath,
+        templateId: opts.templateId,
+        templateVersionId: opts.templateVersionId,
+      });
 
-    if (!resp.ok || !resp.result) {
-      const err = resp.error ?? 'PSD 解析失败（未知错误）';
-      // 保留原错误类型语义：文件过大 / 图层超限
-      const e = new Error(err);
-      e.name = resp.name ?? 'PsdParseError';
-      throw e;
+      if (!resp.ok || !resp.result) {
+        const err = resp.error ?? 'PSD 解析失败（未知错误）';
+        // 保留原错误类型语义：文件过大 / 图层超限
+        const e = new Error(err);
+        e.name = resp.name ?? 'PsdParseError';
+        throw e;
+      }
+
+      logger.info({
+        msg: 'PSD 解析完成',
+        canvas: resp.result.canvas,
+        layerCount: resp.result.layerTree.length,
+      });
+
+      return resp.result;
+    } finally {
+      release();
     }
-
-    logger.info({
-      msg: 'PSD 解析完成',
-      canvas: resp.result.canvas,
-      layerCount: resp.result.layerTree.length,
-    });
-
-    return resp.result;
   }
 
   /**

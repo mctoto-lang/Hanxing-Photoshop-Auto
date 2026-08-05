@@ -16,6 +16,7 @@ import type {
 } from '../../types/index.js';
 import { queue } from './queue.js';
 import { getStorage } from '../storage/index.js';
+import { storageConfigService } from '../storage/storage-config-service.js';
 import { webhookService } from '../webhook/webhook-service.js';
 
 export interface CreateJobParams {
@@ -31,6 +32,7 @@ export interface CreateJobParams {
   /** 第二期：能力路由要求（可选） */
   requiredCapabilities?: Record<string, unknown>;
   targetWorkerId?: string;
+  jsxTimeoutSeconds?: number;
 }
 
 class RenderJobService {
@@ -89,6 +91,7 @@ class RenderJobService {
       include: { template: { include: { bindings: true } } },
     });
     if (!tv) throw Errors.templateNotPublished('模板版本不存在');
+    if (tv.template.tenantId !== params.tenantId) throw Errors.templateNotPublished('模板版本不存在');
     if (!tv.published) throw Errors.templateNotPublished('模板版本未发布，无法提交渲染');
 
     if (params.targetWorkerId) {
@@ -156,6 +159,7 @@ class RenderJobService {
         // 跨租户访问——不暴露"存在但无权"的信息，统一返回不存在
         throw Errors.invalidInputAsset(`资产 ${val.assetId} 不存在或非输入类型`);
       }
+      if (artifact.jobId) throw Errors.invalidInputAsset(`资产 ${val.assetId} 已被其他任务使用`);
       if (artifact.expiresAt < new Date()) {
         throw Errors.invalidInputAsset(`资产 ${val.assetId} 已过期`);
       }
@@ -197,6 +201,7 @@ class RenderJobService {
             outputFormat: params.output.format,
             priority: params.priority ?? 5,
             maxAttempts: env.MAX_ATTEMPTS,
+            jsxTimeoutSeconds: Math.min(3600, Math.max(60, Math.trunc(params.jsxTimeoutSeconds ?? 600))),
             webhookUrl: params.webhookUrl,
             traceId: params.traceId,
             status: 'QUEUED',
@@ -242,14 +247,22 @@ class RenderJobService {
     // P2-7 修复：原循环串行 await N 次 SQL，改用 $transaction 一次性提交
     // N 个输入资产时减少 N-1 次 DB 往返
     if (inputArtifacts.length > 0) {
-      await prisma.$transaction(
-        inputArtifacts.map((a) =>
-          prisma.artifact.update({
-            where: { id: a.artifactId },
-            data: { jobId: job.id, bindingId: a.bindingId },
-          }),
-        ),
-      );
+      try {
+        const claimedArtifacts = await prisma.$transaction(
+          inputArtifacts.map((a) =>
+            prisma.artifact.updateMany({
+              where: { id: a.artifactId, jobId: null },
+              data: { jobId: job.id, bindingId: a.bindingId },
+            }),
+          ),
+        );
+        if (claimedArtifacts.some((result) => result.count !== 1)) {
+          throw Errors.invalidInputAsset('一个或多个输入资产已被其他任务使用');
+        }
+      } catch (error) {
+        await prisma.renderJob.delete({ where: { id: job.id } }).catch(() => {});
+        throw error;
+      }
     }
 
     logger.info({
@@ -344,6 +357,11 @@ class RenderJobService {
     };
 
     const storage = await getStorage();
+    // manifest 下载/上传预签名 URL 有效期：独立配置项（默认 600s），可在 Admin UI 调整。
+    //   原 LEASE_TTL_SECONDS*3（=270s）会被 271s+ 的 JSX 执行踩线导致上传 URL 过期
+    //   （403 Request has expired）。需大于 JSX 最长执行时间。
+    const runtime = await storageConfigService.getRuntime();
+    const urlTtl = runtime.manifestUrlExpiresSec;
     // P1-17 修复：并行生成产物与字体的下载 URL
     // 原串行 for-await 在多输入+多字体时 Worker claim 响应延迟显著
     // P2-D：downloadToken 单独返回，Worker 通过 Authorization: Bearer 头携带，
@@ -353,7 +371,7 @@ class RenderJobService {
         job.artifacts.map(async (a) => {
           const dl = await storage.generateDownloadUrl({
             objectKey: a.objectKey,
-            expiresInSec: env.LEASE_TTL_SECONDS * 3,
+            expiresInSec: urlTtl,
           });
           return {
             bindingId: a.bindingId!,
@@ -367,7 +385,7 @@ class RenderJobService {
       ),
       storage.generateDownloadUrl({
         objectKey: job.templateVersion.psdObjectKey,
-        expiresInSec: env.LEASE_TTL_SECONDS * 3,
+        expiresInSec: urlTtl,
       }),
       (async () => {
         const fonts = await prisma.fontVersion.findMany({ where: { published: true } });
@@ -375,7 +393,7 @@ class RenderJobService {
           fonts.map(async (f) => {
             const dl = await storage.generateDownloadUrl({
               objectKey: f.fileObjectKey,
-              expiresInSec: env.LEASE_TTL_SECONDS * 3,
+              expiresInSec: urlTtl,
             });
             return {
               fontId: f.id,
@@ -395,14 +413,16 @@ class RenderJobService {
     // pixel：降级使用 bounds 画布尺寸（像素图层无内部文档尺寸）
     const layerTree: LayerNode[] = JSON.parse(job.templateVersion.layerTree);
     const flatLayers = this.flattenLayerTree(layerTree);
-    const layerById = new Map(flatLayers.map((n) => [n.layerId, n]));
-    const layerSizes: Array<{ layerId: number; width: number; height: number }> = [];
+    const layerById = new Map(flatLayers.filter((n) => n.layerId !== 0).map((n) => [n.layerId, n]));
+    const layerByPath = new Map(flatLayers.map((n) => [n.layerPath, n]));
+    const layerSizes: Array<{ layerId: number; layerPath: string; width: number; height: number }> = [];
     for (const b of layerSchema.bindings) {
-      const node = layerById.get(b.layerId);
+      const node = layerById.get(b.layerId) ?? layerByPath.get(b.layerPath);
       if (!node) continue;
       if (b.type === 'smartObject' && node.smartObjectSize) {
         layerSizes.push({
           layerId: b.layerId,
+          layerPath: b.layerPath,
           width: node.smartObjectSize.width,
           height: node.smartObjectSize.height,
         });
@@ -411,7 +431,7 @@ class RenderJobService {
         const w = node.bounds.right - node.bounds.left;
         const h = node.bounds.bottom - node.bounds.top;
         if (w > 0 && h > 0) {
-          layerSizes.push({ layerId: b.layerId, width: w, height: h });
+          layerSizes.push({ layerId: b.layerId, layerPath: b.layerPath, width: w, height: h });
         }
       }
     }
@@ -425,7 +445,7 @@ class RenderJobService {
     const resultUp = await storage.generateUploadUrl({
       objectKey: resultObjectKey,
       mimeType: resultMime,
-      expiresInSec: env.LEASE_TTL_SECONDS * 3,
+      expiresInSec: urlTtl,
     });
 
     return {
@@ -443,6 +463,7 @@ class RenderJobService {
       artifacts,
       fonts: fontList,
       layerSizes,
+      jsxTimeoutSeconds: job.jsxTimeoutSeconds,
       resultUploadUrl: resultUp.uploadUrl,
       resultObjectKey,
       resultUploadToken: resultUp.uploadToken,
@@ -597,21 +618,19 @@ class RenderJobService {
         where: { id: workerId },
         data: { currentJobId: null },
       });
+      if (job.webhookUrl) {
+        await webhookService.enqueueOutbox(tx, {
+          jobId: job.id,
+          event: 'job.succeeded',
+          targetUrl: job.webhookUrl,
+          apiKeyId: job.apiKeyId,
+        });
+      }
     });
 
     logger.info({ jobId: job.id, msg: '任务完成' });
 
     // 触发 Webhook（M6 生产级：幂等 + 重试 + 指数退避）
-    if (job.webhookUrl) {
-      webhookService.enqueue({
-        jobId: job.id,
-        event: 'job.succeeded',
-        targetUrl: job.webhookUrl,
-        apiKeyId: job.apiKeyId,
-      }).catch((e) => {
-        logger.warn({ err: e as Error, jobId: job.id, msg: 'Webhook 入队失败' });
-      });
-    }
   }
 
   /**
@@ -657,24 +676,19 @@ class RenderJobService {
         where: { id: workerId },
         data: { currentJobId: null },
       });
+      if (job.webhookUrl) {
+        await webhookService.enqueueOutbox(tx, {
+          jobId: job.id,
+          event: 'job.failed',
+          targetUrl: job.webhookUrl,
+          apiKeyId: job.apiKeyId,
+          payload: { errorCode: data.errorCode, errorMessage: data.errorMessage },
+        });
+      }
     });
 
     logger.warn({ jobId: job.id, code: data.errorCode, msg: '任务失败' });
 
-    if (job.webhookUrl) {
-      webhookService.enqueue({
-        jobId: job.id,
-        event: 'job.failed',
-        targetUrl: job.webhookUrl,
-        apiKeyId: job.apiKeyId,
-        payload: {
-          errorCode: data.errorCode,
-          errorMessage: data.errorMessage,
-        },
-      }).catch((e) => {
-        logger.warn({ err: e as Error, jobId: job.id, msg: 'Webhook 入队失败' });
-      });
-    }
   }
 
   /**
@@ -734,17 +748,29 @@ class RenderJobService {
 
     // QUEUED：直接取消，无需 Worker 介入
     if (job.status === 'QUEUED') {
-      const cancelResult = await prisma.renderJob.updateMany({
-        where: { id: job.id, status: 'QUEUED' },
-        data: {
-          status: 'CANCELLED',
-          cancelRequestedAt: now,
-          cancelReason: reason ?? 'caller_requested',
-          cancelledAt: now,
-          leaseToken: null,
-          leaseExpiresAt: null,
-          workerId: null,
-        },
+      const cancelResult = await prisma.$transaction(async (tx) => {
+        const result = await tx.renderJob.updateMany({
+          where: { id: job.id, status: 'QUEUED' },
+          data: {
+            status: 'CANCELLED',
+            cancelRequestedAt: now,
+            cancelReason: reason ?? 'caller_requested',
+            cancelledAt: now,
+            leaseToken: null,
+            leaseExpiresAt: null,
+            workerId: null,
+          },
+        });
+        if (result.count === 1 && job.webhookUrl) {
+          await webhookService.enqueueOutbox(tx, {
+            jobId: job.id,
+            event: 'job.cancelled',
+            targetUrl: job.webhookUrl,
+            apiKeyId: job.apiKeyId,
+            payload: { reason: reason ?? 'caller_requested', source: 'queued' },
+          });
+        }
+        return result;
       });
       if (cancelResult.count === 0) {
         // 状态已被并发改变（如被 Worker claim 为 LEASED），按当前最新状态返回
@@ -770,21 +796,6 @@ class RenderJobService {
       logger.info({ jobId: job.id, msg: 'QUEUED 任务直接取消' });
 
       // 触发 job.cancelled webhook
-      if (job.webhookUrl) {
-        webhookService.enqueue({
-          jobId: job.id,
-          event: 'job.cancelled',
-          targetUrl: job.webhookUrl,
-          apiKeyId: job.apiKeyId,
-          payload: {
-            reason: reason ?? 'caller_requested',
-            source: 'queued',
-          },
-        }).catch((e) => {
-          logger.warn({ err: e as Error, jobId: job.id, msg: 'Webhook 入队失败' });
-        });
-      }
-
       return { jobId: job.id, status: 'CANCELLED', updated: true };
     }
 
@@ -816,59 +827,71 @@ class RenderJobService {
    *
    * @returns cancelled=true 表示 Worker 应立即放弃任务
    */
-  async checkCancelSignal(jobId: string, workerId: string): Promise<{ cancelled: boolean }> {
-    const job = await prisma.renderJob.findUnique({
-      where: { id: jobId },
-      select: { id: true, status: true, workerId: true, webhookUrl: true, apiKeyId: true, cancelReason: true },
-    });
-    if (!job) return { cancelled: false };
-    if (job.workerId !== workerId) return { cancelled: false };
-
-    if (job.status === 'CANCELLING') {
-      const now = new Date();
-      // P1 修复（审查 1.2）：原 renderJob.update 无 WHERE leaseToken 条件，
-      //   worker.update 无 WHERE currentJobId 条件。租约过期窗口内原 Worker 的
-      //   leaseToken 可能已被 reaper 清空，Worker 调用 checkCancelSignal 时若
-      //   workerId 已被改写，worker.update 会误清新任务的 currentJobId。
-      //   现改为条件更新：仅 CANCELLING 状态才更新；仅 currentJobId === job.id 才清空。
-      const cancelResult = await prisma.renderJob.updateMany({
-        where: { id: job.id, status: 'CANCELLING' },
-        data: {
-          status: 'CANCELLED',
-          cancelledAt: now,
-          leaseToken: null,
-          leaseExpiresAt: null,
-        },
+  async checkCancelSignal(
+    jobId: string,
+    workerId: string,
+  ): Promise<{ cancelled: boolean; status: string }> {
+    try {
+      const job = await prisma.renderJob.findUnique({
+        where: { id: jobId },
+        select: { id: true, status: true, workerId: true, webhookUrl: true, apiKeyId: true, cancelReason: true },
       });
-      if (cancelResult.count === 0) {
-        // 状态已变（如被 reaper 重排队或 adminForceCancel），无需再处理
-        return { cancelled: false };
-      }
-      await prisma.worker.updateMany({
-        where: { id: workerId, currentJobId: job.id },
-        data: { currentJobId: null },
-      });
-      logger.info({ jobId: job.id, msg: 'Worker 检测到取消信号，任务标记 CANCELLED' });
+      if (!job) return { cancelled: false, status: 'UNKNOWN' };
+      // workerId 不匹配时返回 'UNKNOWN'，避免向非持有方泄露任务状态
+      if (job.workerId !== workerId) return { cancelled: false, status: 'UNKNOWN' };
 
-      // 触发 job.cancelled webhook
-      if (job.webhookUrl) {
-        webhookService.enqueue({
-          jobId: job.id,
-          event: 'job.cancelled',
-          targetUrl: job.webhookUrl,
-          apiKeyId: job.apiKeyId,
-          payload: {
-            reason: job.cancelReason ?? 'caller_requested',
-            source: 'worker',
-          },
-        }).catch((e) => {
-          logger.warn({ err: e as Error, jobId: job.id, msg: 'Webhook 入队失败' });
+      if (job.status === 'CANCELLING') {
+        const now = new Date();
+        // P1 修复（审查 1.2）：原 renderJob.update 无 WHERE leaseToken 条件，
+        //   worker.update 无 WHERE currentJobId 条件。租约过期窗口内原 Worker 的
+        //   leaseToken 可能已被 reaper 清空，Worker 调用 checkCancelSignal 时若
+        //   workerId 已被改写，worker.update 会误清新任务的 currentJobId。
+        //   现改为条件更新：仅 CANCELLING 状态才更新；仅 currentJobId === job.id 才清空。
+        const cancelResult = await prisma.$transaction(async (tx) => {
+          const result = await tx.renderJob.updateMany({
+            where: { id: job.id, status: 'CANCELLING' },
+            data: {
+              status: 'CANCELLED',
+              cancelledAt: now,
+              leaseToken: null,
+              leaseExpiresAt: null,
+            },
+          });
+          if (result.count === 1) {
+            await tx.worker.updateMany({ where: { id: workerId, currentJobId: job.id }, data: { currentJobId: null } });
+            if (job.webhookUrl) {
+              await webhookService.enqueueOutbox(tx, {
+                jobId: job.id,
+                event: 'job.cancelled',
+                targetUrl: job.webhookUrl,
+                apiKeyId: job.apiKeyId,
+                payload: { reason: job.cancelReason ?? 'caller_requested', source: 'worker' },
+              });
+            }
+          }
+          return result;
         });
-      }
+        if (cancelResult.count === 0) {
+          // 状态已变（如被 reaper 重排队或 adminForceCancel），无需再处理
+          // 重新查询以获取最新状态，避免回传过期的 'CANCELLING'
+          const latest = await prisma.renderJob.findUnique({
+            where: { id: job.id },
+            select: { status: true },
+          });
+          return { cancelled: false, status: latest?.status ?? 'UNKNOWN' };
+        }
+        logger.info({ jobId: job.id, msg: 'Worker 检测到取消信号，任务标记 CANCELLED' });
 
-      return { cancelled: true };
+        return { cancelled: true, status: 'CANCELLED' };
+      }
+      return { cancelled: false, status: job.status };
+    } catch (e) {
+      // 数据库异常（如 SQLITE_BUSY / 连接错误）时按"未取消"处理，
+      // 与 worker 端 BackendClient.checkCancel 的"尽力而为"语义对齐：
+      // 检查失败不应阻塞任务执行，避免瞬时数据库错误产生 HTTP 500 噪音。
+      logger.warn({ err: e as Error, jobId, workerId, msg: '取消信号检查数据库异常' });
+      return { cancelled: false, status: 'UNKNOWN' };
     }
-    return { cancelled: false };
   }
 
   // ============== 第三期 M4：Admin 写操作 ==============

@@ -152,6 +152,9 @@ async function claimNextJob(
         },
       });
 
+    const worker = await tx.worker.findUnique({ where: { id: workerId }, select: { currentJobId: true } });
+    if (!worker || worker.currentJobId) return null;
+
       if (claimed.count === 1) {
         // 抢到了——更新 Worker 状态
         await tx.worker.update({

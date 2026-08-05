@@ -64,8 +64,9 @@ async function buildServer(): Promise<FastifyInstance> {
       if (typeof h === 'string' && /^[a-zA-Z0-9_-]{4,64}$/.test(h)) return h;
       return randomUUID().replace(/-/g, '').slice(0, 8);
     },
-    // bodyLimit 与 MAX_INPUT_SIZE_MB 一致，避免 50-150MB 图片被 Fastify 直接 413 拒绝
-    // （路由内仍会按 env.MAX_INPUT_SIZE_MB 做业务校验）
+    // 全局 bodyLimit 与 MAX_INPUT_SIZE_MB 一致（默认 150MB），覆盖输入资产等常规路由。
+    // PSD 模板上传路由（/admin/api/templates/upload、/storage/upload）因需支持 300MB 大文件，
+    //   在路由级单独覆盖 bodyLimit（见各路由），此处不放宽全站限额。
     bodyLimit: env.MAX_INPUT_SIZE_MB * 1024 * 1024,
     disableRequestLogging: false,
   });

@@ -26,6 +26,7 @@
     "@fastify/swagger": "^8.15.0",
     "@fastify/swagger-ui": "^3.1.0",
     "@prisma/client": "^5.18.0",
+    "ag-psd": "^31.0.2",
     "bcryptjs": "^2.4.3",
     "cos-nodejs-sdk-v5": "^2.14.4",
     "dotenv": "^16.4.5",
@@ -35,8 +36,8 @@
     "fontkit": "^2.0.2",
     "pino": "^9.4.0",
     "pino-pretty": "^11.2.2",
-    "psd": "^3.1.0",
     "prisma": "^5.18.0",
+    "psd": "^3.1.0",
     "sharp": "^0.33.5",
     "zod": "^3.23.8"
   },

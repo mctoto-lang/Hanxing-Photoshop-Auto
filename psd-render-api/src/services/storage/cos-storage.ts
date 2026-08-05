@@ -117,6 +117,8 @@ export class CosStorageService implements StorageService {
    * P1-I 修复：新增大小限制，与 LocalStorageService 行为对齐。
    *   原实现无任何大小校验，流式 body 可被恶意超大流打满内存。
    *   现统一以 env.MAX_INPUT_SIZE_MB 为上限，超限即拒绝。
+   * PSD 限额隔离：psd/ 前缀对象走 MAX_PSD_SIZE_MB，其余走 MAX_INPUT_SIZE_MB
+   *   （与 LocalStorageService 一致，避免误放宽输入资产限额）。
    */
   async putObject(opts: {
     objectKey: string;
@@ -124,7 +126,9 @@ export class CosStorageService implements StorageService {
     mimeType?: string;
     contentLength?: number;
   }): Promise<ObjectMeta> {
-    const maxBytes = env.MAX_INPUT_SIZE_MB * 1024 * 1024;
+    const maxBytes = opts.objectKey.startsWith('psd/')
+      ? env.MAX_PSD_SIZE_MB * 1024 * 1024
+      : env.MAX_INPUT_SIZE_MB * 1024 * 1024;
 
     // Buffer 模式：直接校验大小
     let bodyToUpload: Buffer | NodeJS.ReadableStream = opts.body;

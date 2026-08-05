@@ -168,6 +168,7 @@ model StorageConfig {
   cosRegion             String?
   cosInternalDomain     String?
   cosPresignExpiresSec  Int?
+  manifestUrlExpiresSec Int?
   cosSecretIdEncrypted  String?
   cosSecretKeyEncrypted String?
   updatedAt             DateTime @updatedAt
@@ -188,6 +189,7 @@ model RenderJob {
   priority          Int      @default(5)
   attempt           Int      @default(0)
   maxAttempts       Int      @default(3)
+  jsxTimeoutSeconds Int      @default(600)
   requiredCapabilities String?
   targetWorkerId    String?
   cancelRequestedAt DateTime?

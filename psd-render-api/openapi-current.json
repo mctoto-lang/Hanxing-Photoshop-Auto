@@ -32,13 +32,13 @@
         "type": "apiKey",
         "in": "header",
         "name": "Authorization",
-        "description": "存储签名令牌（格式：Bearer <token>，由 generateUploadUrl/generateDownloadUrl 签发，仅 local 模式可用。也支持 ?token= 查询参数，但不推荐）"
+        "description": "存储签名令牌（格式：Bearer <token>，由 generateUploadUrl/generateDownloadUrl 签发，仅 local 模式可用。仅接受 Authorization 头传递，不支持 query 参数）"
       },
       "workerRegisterSecret": {
         "type": "apiKey",
         "in": "header",
         "name": "Authorization",
-        "description": "Worker 注册凭据（格式：Bearer <WORKER_REGISTER_SECRET> 或一次性配对码/token，也可通过 X-Worker-Register-Secret 头传递）"
+        "description": "Worker 注册凭据（格式：Bearer <WORKER_REGISTER_SECRET> 或一次性授权码/token，也可通过 X-Worker-Register-Secret 头传递）"
       }
     },
     "schemas": {
@@ -284,19 +284,7 @@
         "tags": [
           "storage"
         ],
-        "description": "校验签名令牌后直接写入本地文件系统，模拟 COS 预签名 URL 行为。\n\n**鉴权**：通过 `Authorization: Bearer <token>` 头或 `?token=` 查询参数携带上传令牌（header 推荐）。\n\n**安全校验**：\n- `input/` 路径：强制魔数校验（仅接受 JPEG/PNG），挡掉伪装成图片的 HTML/JS\n- `output/` 路径：强制魔数校验（仅接受 PNG/JPEG/PSD），防止 Worker 上传任意内容\n\n**注意**：此端点仅 `STORAGE_BACKEND=local` 时可用，切换 COS 后由客户端直传 COS。",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "string",
-                "format": "binary",
-                "description": "文件二进制流（Content-Type 应为文件实际 MIME 类型）"
-              }
-            }
-          },
-          "description": "文件二进制流（Content-Type 应为文件实际 MIME 类型）"
-        },
+        "description": "校验签名令牌后直接写入本地文件系统，模拟 COS 预签名 URL 行为。\n\n**鉴权**：通过 `Authorization: Bearer <token>` 头携带上传令牌。\n\n**安全校验**：\n- `input/` 路径：强制魔数校验（仅接受 JPEG/PNG），挡掉伪装成图片的 HTML/JS\n- `output/` 路径：强制魔数校验（仅接受 PNG/JPEG/PSD），防止 Worker 上传任意内容\n\n**注意**：此端点仅 `STORAGE_BACKEND=local` 时可用，切换 COS 后由客户端直传 COS。",
         "parameters": [
           {
             "schema": {
@@ -306,15 +294,6 @@
             "name": "key",
             "required": true,
             "description": "对象键（如 input/xxx.png、output/yyy.png）"
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "query",
-            "name": "token",
-            "required": false,
-            "description": "下载/上传令牌（兼容旧 Worker，推荐改用 Authorization 头）"
           },
           {
             "schema": {
@@ -404,7 +383,7 @@
         "tags": [
           "storage"
         ],
-        "description": "校验签名令牌后从本地文件系统读取文件并返回二进制流，模拟 COS 预签名 URL 行为。\n\n**鉴权**：通过 `Authorization: Bearer <token>` 头或 `?token=` 查询参数携带下载令牌（header 推荐）。\n\n**响应**：返回文件二进制流，`Content-Type` 为文件实际 MIME 类型，`Content-Disposition: inline` 便于浏览器内联预览。\n\n**注意**：此端点仅 `STORAGE_BACKEND=local` 时可用。",
+        "description": "校验签名令牌后从本地文件系统读取文件并返回二进制流，模拟 COS 预签名 URL 行为。\n\n**鉴权**：通过 `Authorization: Bearer <token>` 头携带下载令牌。\n\n**响应**：返回文件二进制流，`Content-Type` 为文件实际 MIME 类型，`Content-Disposition: inline` 便于浏览器内联预览。\n\n**注意**：此端点仅 `STORAGE_BACKEND=local` 时可用。",
         "parameters": [
           {
             "schema": {
@@ -414,15 +393,6 @@
             "name": "key",
             "required": true,
             "description": "对象键（如 input/xxx.png、output/yyy.png）"
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "query",
-            "name": "token",
-            "required": false,
-            "description": "下载令牌（兼容旧 Worker，推荐改用 Authorization 头）"
           }
         ],
         "security": [
@@ -617,6 +587,107 @@
         }
       }
     },
+    "/v1/assets/{assetId}/complete": {
+      "post": {
+        "summary": "确认资产上传完成",
+        "tags": [
+          "assets"
+        ],
+        "description": "客户端通过 `POST /v1/assets/upload-url` 拿到预签名地址并 PUT 上传完成后，调用本接口回填实际 sha256/sizeBytes/mime。\n\n服务端会校验：\n- 资产存在且属于当前租户（jobId 为 null，即未被任何任务占用）\n- 存储中对象已存在（HEAD 检查）\n- 大小不超过 `MAX_INPUT_SIZE_MB`\n\n校验通过后将资产标记为可用，提交渲染任务时即可在 `input.{bindingId}.assetId` 引用。\n\n注意：资产不存在 / 未上传完成 / 大小超限 / 已被其他任务使用 等情况均统一返回 422 `INVALID_INPUT_ASSET`，详见各响应描述。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "assetId",
+            "required": true,
+            "description": "资产编码（art_xxx），由 upload-url 接口返回"
+          }
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "回填成功，返回资产的实际 sha256 与字节数",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "回填成功，返回资产的实际 sha256 与字节数",
+                  "required": [
+                    "assetId",
+                    "sha256",
+                    "sizeBytes"
+                  ],
+                  "properties": {
+                    "assetId": {
+                      "type": "string",
+                      "description": "资产编码（art_xxx）"
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "description": "资产实际 SHA-256（hex）"
+                    },
+                    "sizeBytes": {
+                      "type": "integer",
+                      "description": "资产实际字节数"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API Key 无效或缺少 tenantId",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "API Key 无效或缺少 tenantId"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "IP 白名单拒绝 / 作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "IP 白名单拒绝 / 作用域不足"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "INVALID_INPUT_ASSET：资产不存在/不属于当前租户/未上传完成/大小不符限制/已被其他任务使用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "INVALID_INPUT_ASSET：资产不存在/不属于当前租户/未上传完成/大小不符限制/已被其他任务使用"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "触发限流或日配额耗尽",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "触发限流或日配额耗尽"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/templates/upload-url": {
       "post": {
         "summary": "获取 PSD 文件上传地址",
@@ -641,6 +712,13 @@
                   "mimeType": {
                     "type": "string",
                     "description": "可选，默认 image/vnd.adobe.photoshop"
+                  },
+                  "sizeBytes": {
+                    "type": "integer",
+                    "format": "int64",
+                    "minimum": 1,
+                    "maximum": 314572800,
+                    "description": "可选，文件大小（字节，上限 300MB）"
                   }
                 }
               }
@@ -780,25 +858,48 @@
         ],
         "responses": {
           "200": {
-            "description": "创建成功，返回模板 ID 与解析得到的图层树",
+            "description": "创建成功，返回模板 ID、版本 ID、画布尺寸与图层树",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "description": "创建成功，返回模板 ID 与解析得到的图层树",
+                  "description": "创建成功，返回模板 ID、版本 ID、画布尺寸与图层树",
+                  "required": [
+                    "templateId",
+                    "templateVersionId",
+                    "canvas",
+                    "layerTree"
+                  ],
                   "properties": {
                     "templateId": {
                       "type": "string",
                       "description": "模板 ID（tpl_xxx）"
                     },
-                    "version": {
-                      "type": "integer",
-                      "description": "版本号（首个版本为 1）"
+                    "templateVersionId": {
+                      "type": "string",
+                      "description": "模板版本 ID（tpv_xxx），后续提交渲染任务时使用"
                     },
-                    "layerSchema": {
+                    "canvas": {
                       "type": "object",
-                      "additionalProperties": true,
-                      "description": "解析得到的图层树结构"
+                      "description": "PSD 画布尺寸",
+                      "properties": {
+                        "width": {
+                          "type": "integer",
+                          "description": "画布宽度（像素）"
+                        },
+                        "height": {
+                          "type": "integer",
+                          "description": "画布高度（像素）"
+                        }
+                      }
+                    },
+                    "layerTree": {
+                      "type": "array",
+                      "description": "解析得到的图层树（递归结构，每个节点含 layerId/layerPath/name/type/bounds/visible/children 等）",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
                     }
                   }
                 }
@@ -866,7 +967,7 @@
         "tags": [
           "templates"
         ],
-        "description": "获取所有模板（含状态、版本数量）。",
+        "description": "获取当前租户下所有未软删除的模板（含状态、最新版本号、发布标志、缩略图 key）。",
         "security": [
           {
             "apiKey": []
@@ -887,7 +988,57 @@
                       "type": "array",
                       "items": {
                         "type": "object",
-                        "additionalProperties": true
+                        "required": [
+                          "templateId",
+                          "code",
+                          "name",
+                          "status",
+                          "statusLabel",
+                          "latestVersion",
+                          "published",
+                          "thumbnailObjectKey",
+                          "createdAt"
+                        ],
+                        "properties": {
+                          "templateId": {
+                            "type": "string",
+                            "description": "模板 ID（tpl_xxx）"
+                          },
+                          "code": {
+                            "type": "string",
+                            "description": "模板编码"
+                          },
+                          "name": {
+                            "type": "string",
+                            "description": "模板名称"
+                          },
+                          "status": {
+                            "type": "string",
+                            "description": "模板状态"
+                          },
+                          "statusLabel": {
+                            "type": "string",
+                            "description": "状态中文标签"
+                          },
+                          "latestVersion": {
+                            "type": "integer",
+                            "description": "最新版本号（从 1 起，无版本时为 0）"
+                          },
+                          "published": {
+                            "type": "boolean",
+                            "description": "最新版本是否已发布"
+                          },
+                          "thumbnailObjectKey": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "缩略图对象 key（无缩略图时为 null）"
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "模板创建时间"
+                          }
+                        }
                       }
                     }
                   }
@@ -1236,7 +1387,7 @@
         "tags": [
           "templates"
         ],
-        "description": "获取模板详情，含图层树、绑定配置、版本列表。",
+        "description": "获取模板详情，含最新版本的图层树、绑定配置、画布尺寸与缩略图。",
         "parameters": [
           {
             "schema": {
@@ -1255,36 +1406,93 @@
         ],
         "responses": {
           "200": {
-            "description": "模板详情，含图层树、绑定配置、版本列表",
+            "description": "模板详情，含最新版本的图层树、绑定配置、画布尺寸与缩略图",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "description": "模板详情，含图层树、绑定配置、版本列表",
+                  "description": "模板详情，含最新版本的图层树、绑定配置、画布尺寸与缩略图",
+                  "required": [
+                    "templateId",
+                    "code",
+                    "name",
+                    "status",
+                    "latestVersion"
+                  ],
                   "properties": {
                     "templateId": {
-                      "type": "string"
+                      "type": "string",
+                      "description": "模板 ID（tpl_xxx）"
                     },
                     "code": {
-                      "type": "string"
+                      "type": "string",
+                      "description": "模板编码"
                     },
                     "name": {
-                      "type": "string"
+                      "type": "string",
+                      "description": "模板名称"
                     },
                     "status": {
                       "type": "string",
-                      "description": "DRAFT | PUBLISHED | ARCHIVED | DELETED"
+                      "description": "模板状态（DRAFT / PUBLISHED / REPUBLISH_REQUIRED / ARCHIVED / DELETED 等）"
                     },
-                    "versions": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "additionalProperties": true
-                      }
-                    },
-                    "layerSchema": {
+                    "latestVersion": {
                       "type": "object",
-                      "additionalProperties": true
+                      "nullable": true,
+                      "description": "最新版本详情；模板刚创建无版本时为 null",
+                      "properties": {
+                        "versionId": {
+                          "type": "string",
+                          "description": "模板版本 ID（tpv_xxx）"
+                        },
+                        "version": {
+                          "type": "integer",
+                          "description": "版本号（从 1 起）"
+                        },
+                        "published": {
+                          "type": "boolean",
+                          "description": "该版本是否已发布"
+                        },
+                        "canvas": {
+                          "type": "object",
+                          "description": "画布尺寸",
+                          "properties": {
+                            "width": {
+                              "type": "integer"
+                            },
+                            "height": {
+                              "type": "integer"
+                            }
+                          }
+                        },
+                        "psMinVersion": {
+                          "type": "string",
+                          "description": "最低 PS 版本要求"
+                        },
+                        "layerTree": {
+                          "type": "array",
+                          "description": "图层树（递归结构）",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": true
+                          }
+                        },
+                        "layerSchema": {
+                          "type": "object",
+                          "additionalProperties": true,
+                          "description": "图层绑定配置（含 bindings 数组）"
+                        },
+                        "thumbnailObjectKey": {
+                          "type": "string",
+                          "nullable": true,
+                          "description": "缩略图对象 key（无缩略图时为 null）"
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "description": "版本创建时间"
+                        }
+                      }
                     }
                   }
                 }
@@ -1403,6 +1611,12 @@
                     "minimum": 1,
                     "maximum": 10,
                     "description": "优先级（数字越小优先级越高，默认 5）"
+                  },
+                  "jsxTimeoutSeconds": {
+                    "type": "integer",
+                    "minimum": 60,
+                    "maximum": 3600,
+                    "description": "可选，Worker 执行 JSX 脚本的超时秒数（默认 600，范围 60-3600）"
                   },
                   "webhookUrl": {
                     "type": "string",
@@ -1608,30 +1822,91 @@
                   ],
                   "properties": {
                     "jobId": {
-                      "type": "string"
-                    },
-                    "code": {
-                      "type": "string"
+                      "type": "string",
+                      "description": "任务编码（job_xxx）"
                     },
                     "status": {
                       "type": "string",
                       "description": "QUEUED | LEASED | PROCESSING | SUCCEEDED | FAILED | CANCELLING | CANCELLED"
                     },
-                    "progress": {
-                      "type": "integer"
+                    "attempt": {
+                      "type": "integer",
+                      "description": "尝试次数（从 1 起，每次重试 +1）"
+                    },
+                    "priority": {
+                      "type": "integer",
+                      "description": "优先级（1-10，数字越小优先级越高）"
                     },
                     "stage": {
-                      "type": "string"
+                      "type": "string",
+                      "nullable": true,
+                      "description": "当前执行阶段（DOWNLOAD / RUN_JSX / EXPORT / UPLOAD）"
+                    },
+                    "progress": {
+                      "type": "integer",
+                      "description": "执行进度（0-100）"
+                    },
+                    "template": {
+                      "type": "object",
+                      "description": "模板信息",
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "description": "模板名称"
+                        },
+                        "version": {
+                          "type": "string",
+                          "description": "模板版本 ID"
+                        }
+                      }
                     },
                     "resultUrl": {
                       "type": "string",
-                      "description": "结果下载地址（SUCCEEDED 时返回，3 天有效）"
+                      "description": "结果下载地址（SUCCEEDED 时返回，默认 3 天有效，由 OUTPUT_RETENTION_DAYS 控制）"
+                    },
+                    "resultExpiresAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true,
+                      "description": "结果下载地址过期时间"
                     },
                     "errorCode": {
-                      "type": "string"
+                      "type": "string",
+                      "nullable": true,
+                      "description": "失败时的错误码"
                     },
                     "errorMessage": {
-                      "type": "string"
+                      "type": "string",
+                      "nullable": true,
+                      "description": "失败时的错误详情"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "description": "任务创建时间"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "description": "任务最后更新时间"
+                    },
+                    "queuedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true,
+                      "description": "入队时间"
+                    },
+                    "succeededAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true,
+                      "description": "成功完成时间"
+                    },
+                    "failedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true,
+                      "description": "失败时间"
                     }
                   }
                 }
@@ -2000,36 +2275,32 @@
                   "type": "object",
                   "required": [
                     "workerId",
-                    "code",
+                    "workerCode",
                     "accessToken",
-                    "sessionActive",
                     "tokenExpiresAt",
                     "allowedDownloadHosts"
                   ],
                   "properties": {
                     "workerId": {
-                      "type": "string"
-                    },
-                    "code": {
-                      "type": "string"
-                    },
-                    "accessToken": {
                       "type": "string",
-                      "description": "Worker 访问令牌（后续请求 Authorization: Bearer xxx）"
-                    },
-                    "sessionActive": {
-                      "type": "boolean"
+                      "description": "Worker 内部 ID"
                     },
                     "workerCode": {
                       "type": "string",
                       "description": "Worker 编号（如 wrk_xxx）"
                     },
+                    "accessToken": {
+                      "type": "string",
+                      "description": "Worker 访问令牌（后续请求 Authorization: Bearer xxx）"
+                    },
                     "customCode": {
                       "type": "string",
+                      "nullable": true,
                       "description": "管理后台设置的自定义编号（Worker UI 优先展示此字段，回退到 workerCode）"
                     },
                     "displayName": {
                       "type": "string",
+                      "nullable": true,
                       "description": "管理后台设置的显示名称"
                     },
                     "tokenExpiresAt": {
@@ -2214,7 +2485,7 @@
                     },
                     "jobCode": {
                       "type": "string",
-                      "description": "任务编号（PSD_YYMMDD_NNNN 格式，用于 job 文件夹命名）"
+                      "description": "任务编号（job_xxx 格式，与 genJobCode 一致，Worker 用作 job 文件夹命名）"
                     },
                     "leaseToken": {
                       "type": "string",
@@ -2811,28 +3082,6 @@
                 }
               }
             }
-          },
-          "404": {
-            "description": "任务不存在",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/def-0",
-                  "description": "任务不存在"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "任务状态冲突",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/def-0",
-                  "description": "任务状态冲突"
-                }
-              }
-            }
           }
         }
       }
@@ -3342,8 +3591,7 @@
                             "nullable": true
                           },
                           "template": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "type": "string"
                           },
                           "worker": {
                             "type": "object",
@@ -4714,21 +4962,46 @@
         ],
         "responses": {
           "201": {
-            "description": "Default Response",
+            "description": "创建成功，返回模板 ID、版本 ID、画布尺寸与图层树",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
+                  "description": "创建成功，返回模板 ID、版本 ID、画布尺寸与图层树",
+                  "required": [
+                    "templateId",
+                    "templateVersionId",
+                    "canvas",
+                    "layerTree"
+                  ],
                   "properties": {
                     "templateId": {
-                      "type": "string"
-                    },
-                    "version": {
-                      "type": "integer"
-                    },
-                    "layerSchema": {
                       "type": "string",
-                      "description": "图层树 JSON"
+                      "description": "模板 ID（tpl_xxx）"
+                    },
+                    "templateVersionId": {
+                      "type": "string",
+                      "description": "模板版本 ID（tpv_xxx）"
+                    },
+                    "canvas": {
+                      "type": "object",
+                      "description": "PSD 画布尺寸",
+                      "properties": {
+                        "width": {
+                          "type": "integer"
+                        },
+                        "height": {
+                          "type": "integer"
+                        }
+                      }
+                    },
+                    "layerTree": {
+                      "type": "array",
+                      "description": "解析得到的图层树（递归结构）",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
                     }
                   }
                 }
@@ -4754,7 +5027,7 @@
         "tags": [
           "admin-tests"
         ],
-        "description": "返回已发布且已配置图层绑定的模板版本，用于测试渲染任务的下拉选择。仅返回未软删除模板的已发布版本。",
+        "description": "返回所有租户中已发布且已配置图层绑定的模板版本，用于测试渲染任务的下拉选择。仅返回未软删除模板的已发布版本。",
         "security": [
           {
             "adminSession": []
@@ -4806,7 +5079,7 @@
         "tags": [
           "admin-tests"
         ],
-        "description": "上传测试用图片资产（PNG/JPG/JPEG/WEBP），写入 tenantId=admin-test 隔离空间。请求体为原始图片二进制。operator 及以上可调用。",
+        "description": "上传测试用图片资产（PNG/JPG/JPEG/WEBP），写入指定模板版本所属租户。请求体为原始图片二进制。operator 及以上可调用。",
         "parameters": [
           {
             "schema": {
@@ -4816,6 +5089,15 @@
             "name": "fileName",
             "required": false,
             "description": "图片文件名（默认 image.png）"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "query",
+            "name": "templateVersionId",
+            "required": true,
+            "description": "当前测试模板版本 ID"
           }
         ],
         "security": [
@@ -4865,7 +5147,7 @@
         "tags": [
           "admin-tests"
         ],
-        "description": "创建指定 Worker 的测试渲染任务，写入 tenantId=admin-test 隔离空间。priority=1（最高优先级）。operator 及以上可调用。",
+        "description": "创建指定 Worker 的测试渲染任务，写入所选模板版本所属租户。priority=1（最高优先级）。operator 及以上可调用。",
         "requestBody": {
           "content": {
             "application/json": {
@@ -4918,6 +5200,12 @@
                         "maximum": 100
                       }
                     }
+                  },
+                  "jsxTimeoutSeconds": {
+                    "type": "integer",
+                    "minimum": 60,
+                    "maximum": 3600,
+                    "description": "可选，Worker 执行 JSX 脚本的超时秒数（默认 600）"
                   }
                 }
               }
@@ -5032,6 +5320,12 @@
                     "minimum": 60,
                     "maximum": 604800,
                     "description": "预签名 URL 有效期（秒）"
+                  },
+                  "manifestUrlExpiresSec": {
+                    "type": "integer",
+                    "minimum": 60,
+                    "maximum": 604800,
+                    "description": "任务下载/上传 URL 有效期（秒），需大于 JSX 执行时间（默认600）"
                   },
                   "cosSecretId": {
                     "type": "string",
@@ -5642,15 +5936,17 @@
                 "schema": {
                   "type": "object",
                   "required": [
-                    "ok",
-                    "templateId"
+                    "templateId",
+                    "status"
                   ],
                   "properties": {
-                    "ok": {
-                      "type": "boolean"
-                    },
                     "templateId": {
-                      "type": "string"
+                      "type": "string",
+                      "description": "模板 ID"
+                    },
+                    "status": {
+                      "type": "string",
+                      "description": "归档后模板状态（REPUBLISH_REQUIRED）"
                     }
                   }
                 }
@@ -5710,7 +6006,7 @@
         "tags": [
           "admin-templates"
         ],
-        "description": "将模板从 ARCHIVED 恢复为 DRAFT。operator 及以上可调用。",
+        "description": "将模板从 ARCHIVED 恢复为 DRAFT 或 PUBLISHED。operator 及以上可调用。",
         "parameters": [
           {
             "schema": {
@@ -5734,15 +6030,17 @@
                 "schema": {
                   "type": "object",
                   "required": [
-                    "ok",
-                    "templateId"
+                    "templateId",
+                    "status"
                   ],
                   "properties": {
-                    "ok": {
-                      "type": "boolean"
-                    },
                     "templateId": {
-                      "type": "string"
+                      "type": "string",
+                      "description": "模板 ID"
+                    },
+                    "status": {
+                      "type": "string",
+                      "description": "恢复后模板状态（PUBLISHED | DRAFT）"
                     }
                   }
                 }
@@ -5933,59 +6231,54 @@
                       "items": {
                         "type": "object",
                         "required": [
-                          "id",
+                          "fontId",
                           "code",
                           "familyName",
                           "postscriptName",
                           "style",
-                          "status",
-                          "statusLabel",
-                          "licenseNote",
-                          "sizeBytes",
                           "sha256",
-                          "createdAt",
-                          "publishedAt"
+                          "published",
+                          "licenseNote",
+                          "createdAt"
                         ],
                         "properties": {
-                          "id": {
-                            "type": "string"
+                          "fontId": {
+                            "type": "string",
+                            "description": "字体版本 ID"
                           },
                           "code": {
-                            "type": "string"
+                            "type": "string",
+                            "description": "字体编码（fntv_xxx）"
                           },
                           "familyName": {
-                            "type": "string"
+                            "type": "string",
+                            "description": "字体家族名"
                           },
                           "postscriptName": {
-                            "type": "string"
+                            "type": "string",
+                            "description": "PostScript 名称"
                           },
                           "style": {
-                            "type": "string"
+                            "type": "string",
+                            "description": "字体样式（Regular / Bold 等）"
                           },
-                          "status": {
-                            "type": "string"
+                          "sha256": {
+                            "type": "string",
+                            "description": "字体文件 SHA-256"
                           },
-                          "statusLabel": {
-                            "type": "string"
+                          "published": {
+                            "type": "boolean",
+                            "description": "是否已发布"
                           },
                           "licenseNote": {
                             "type": "string",
-                            "nullable": true
-                          },
-                          "sizeBytes": {
-                            "type": "integer"
-                          },
-                          "sha256": {
-                            "type": "string"
+                            "nullable": true,
+                            "description": "许可证备注"
                           },
                           "createdAt": {
                             "type": "string",
-                            "format": "date-time"
-                          },
-                          "publishedAt": {
-                            "type": "string",
                             "format": "date-time",
-                            "nullable": true
+                            "description": "创建时间"
                           }
                         }
                       }
@@ -6500,11 +6793,11 @@
     },
     "/admin/api/bootstrap-tokens": {
       "post": {
-        "summary": "生成 Worker 注册配对码",
+        "summary": "生成 Worker 授权码",
         "tags": [
           "admin-bootstrap-tokens"
         ],
-        "description": "生成一次性注册配对码和完整 token。明文仅返回一次，请立即复制到 Worker UI。operator 及以上可调用。",
+        "description": "生成一次性授权码和完整 token。明文仅返回一次，请立即复制到 Worker UI。operator 及以上可调用。",
         "requestBody": {
           "content": {
             "application/json": {
@@ -6539,7 +6832,7 @@
                     },
                     "pairingCode": {
                       "type": "string",
-                      "description": "6 位配对码（如 K9F-2X7），Worker UI 输入此码"
+                      "description": "6 位授权码（如 K9F-2X7），Worker UI 输入此码"
                     },
                     "token": {
                       "type": "string",
@@ -6568,11 +6861,11 @@
         }
       },
       "get": {
-        "summary": "列出 Worker 注册配对码",
+        "summary": "列出 Worker 授权码",
         "tags": [
           "admin-bootstrap-tokens"
         ],
-        "description": "列出所有配对码（按创建时间倒序，最多 100 条）。viewer 及以上可调用。",
+        "description": "列出所有授权码（按创建时间倒序，最多 100 条）。viewer 及以上可调用。",
         "security": [
           {
             "adminSession": []
@@ -6648,11 +6941,11 @@
     },
     "/admin/api/bootstrap-tokens/{id}": {
       "delete": {
-        "summary": "作废 Worker 注册配对码",
+        "summary": "作废 Worker 授权码",
         "tags": [
           "admin-bootstrap-tokens"
         ],
-        "description": "作废未使用的配对码。已使用或已作废的配对码不受影响。operator 及以上可调用。",
+        "description": "作废未使用的授权码。已使用或已作废的授权码不受影响。operator 及以上可调用。",
         "parameters": [
           {
             "schema": {
@@ -6699,11 +6992,11 @@
     },
     "/admin/api/bootstrap-tokens/{id}/delete": {
       "post": {
-        "summary": "删除 Worker 注册配对码",
+        "summary": "删除 Worker 授权码",
         "tags": [
           "admin-bootstrap-tokens"
         ],
-        "description": "硬删除已作废或已过期的配对码记录。仅 revoked 或 expired 状态可删除。operator 及以上可调用。",
+        "description": "硬删除已作废或已过期的授权码记录。仅 revoked 或 expired 状态可删除。operator 及以上可调用。",
         "parameters": [
           {
             "schema": {
@@ -6954,28 +7247,7 @@
         "tags": [
           "admin-jobs"
         ],
-        "description": "按状态批量取消任务（默认取消所有活跃任务：QUEUED/LEASED/PROCESSING/CANCELLING）。operator 及以上可调用。",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "status": {
-                    "type": "string",
-                    "enum": [
-                      "QUEUED",
-                      "LEASED",
-                      "PROCESSING",
-                      "CANCELLING"
-                    ],
-                    "description": "可选，仅取消指定状态的任务"
-                  }
-                }
-              }
-            }
-          }
-        },
+        "description": "按状态批量取消任务（默认取消所有活跃任务：QUEUED/LEASED/PROCESSING/CANCELLING）。请求体可选，传 { \"status\": \"QUEUED\" } 仅取消指定状态的任务。operator 及以上可调用。",
         "security": [
           {
             "adminSession": []
@@ -7398,23 +7670,10 @@
                     "description": "权限 scopes 列表"
                   },
                   "webhookUrlDefault": {
-                    "type": "object",
+                    "type": "string",
+                    "format": "uri",
                     "nullable": true,
-                    "description": "默认 Webhook 配置（url/events/enabled）",
-                    "properties": {
-                      "url": {
-                        "type": "string"
-                      },
-                      "events": {
-                        "type": "array",
-                        "items": {
-                          "type": "string"
-                        }
-                      },
-                      "enabled": {
-                        "type": "boolean"
-                      }
-                    }
+                    "description": "默认 Webhook URL（需通过 SSRF 静态校验；null 表示清除）"
                   },
                   "webhookSecret": {
                     "type": "string",
@@ -7862,13 +8121,13 @@
                 "schema": {
                   "type": "object",
                   "required": [
-                    "items",
+                    "logs",
                     "total",
                     "page",
                     "pageSize"
                   ],
                   "properties": {
-                    "items": {
+                    "logs": {
                       "type": "array",
                       "items": {
                         "type": "object",
@@ -7876,13 +8135,13 @@
                           "id",
                           "action",
                           "actor",
-                          "actorType",
+                          "actorIp",
+                          "actorUa",
+                          "result",
                           "refType",
                           "refId",
-                          "result",
-                          "metadata",
-                          "ip",
-                          "userAgent",
+                          "message",
+                          "meta",
                           "createdAt"
                         ],
                         "properties": {
@@ -7895,8 +8154,15 @@
                           "actor": {
                             "type": "string"
                           },
-                          "actorType": {
-                            "type": "string"
+                          "actorIp": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "操作者 IP"
+                          },
+                          "actorUa": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "操作者 User-Agent"
                           },
                           "refType": {
                             "type": "string",
@@ -7909,18 +8175,16 @@
                           "result": {
                             "type": "string"
                           },
-                          "metadata": {
+                          "message": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "操作描述"
+                          },
+                          "meta": {
                             "type": "object",
                             "additionalProperties": true,
-                            "nullable": true
-                          },
-                          "ip": {
-                            "type": "string",
-                            "nullable": true
-                          },
-                          "userAgent": {
-                            "type": "string",
-                            "nullable": true
+                            "nullable": true,
+                            "description": "结构化元数据"
                           },
                           "createdAt": {
                             "type": "string",
@@ -8016,22 +8280,16 @@
                         "type": "object",
                         "required": [
                           "action",
-                          "total",
-                          "success",
-                          "failure"
+                          "count"
                         ],
                         "properties": {
                           "action": {
-                            "type": "string"
+                            "type": "string",
+                            "description": "操作类型"
                           },
-                          "total": {
-                            "type": "integer"
-                          },
-                          "success": {
-                            "type": "integer"
-                          },
-                          "failure": {
-                            "type": "integer"
+                          "count": {
+                            "type": "integer",
+                            "description": "该操作类型的日志总数"
                           }
                         }
                       }
@@ -8106,13 +8364,13 @@
                         "id",
                         "action",
                         "actor",
-                        "actorType",
+                        "actorIp",
+                        "actorUa",
+                        "result",
                         "refType",
                         "refId",
-                        "result",
-                        "metadata",
-                        "ip",
-                        "userAgent",
+                        "message",
+                        "meta",
                         "createdAt"
                       ],
                       "properties": {
@@ -8125,8 +8383,13 @@
                         "actor": {
                           "type": "string"
                         },
-                        "actorType": {
-                          "type": "string"
+                        "actorIp": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "actorUa": {
+                          "type": "string",
+                          "nullable": true
                         },
                         "refType": {
                           "type": "string",
@@ -8139,17 +8402,13 @@
                         "result": {
                           "type": "string"
                         },
-                        "metadata": {
+                        "message": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "meta": {
                           "type": "object",
                           "additionalProperties": true,
-                          "nullable": true
-                        },
-                        "ip": {
-                          "type": "string",
-                          "nullable": true
-                        },
-                        "userAgent": {
-                          "type": "string",
                           "nullable": true
                         },
                         "createdAt": {

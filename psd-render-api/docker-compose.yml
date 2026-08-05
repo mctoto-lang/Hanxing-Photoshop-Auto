@@ -17,13 +17,17 @@
 #   - COS 使用内网域名（cos.ap-guangzhou.myqcloud.com），免公网流量费
 #   - 生产环境必须修改 ADMIN_BOOTSTRAP_PASSWORD 和 API_KEY
 
+# Compose 项目名称：决定容器/网络/数据卷的资源前缀
+# 注：Docker 资源名强制小写，compose 会将大写自动规范化为 hanxing-photoshop-auto
+name: Hanxing-Photoshop-Auto
+
 services:
   # ===== PSD 渲染后端 API（单容器，含 SQLite + 内存队列） =====
   api:
     build:
       context: .
       dockerfile: Dockerfile
-    image: psd-render-api:latest
+    image: hanxing-photoshop-auto:latest
     restart: unless-stopped
     # P0-4：API 端口仅绑定 127.0.0.1，必须由前置 Nginx/网关转发
     # 直接公网暴露会绕过 HTTPS、限流、WAF 等防护层

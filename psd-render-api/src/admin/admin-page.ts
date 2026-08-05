@@ -123,7 +123,9 @@ export const adminPageHtml = `<!DOCTYPE html>
     .worker-history-list { scrollbar-width: thin; scrollbar-color: #2a3142 transparent; }
     /* 限高滚动表格容器：单页展示约 10 条，其余通过滚动查看 */
     .scroll-table { max-height: 400px; overflow-y: auto; }
-    .scroll-table table { width: 100%; border-collapse: collapse; }
+    .scroll-table table { width: 100%; border-collapse: collapse; overflow: visible; }
+    /* 固定首行字段栏：滚动时表头 thead/th 始终吸顶可见 */
+    .scroll-table thead th { position: sticky; top: 0; z-index: 2; background: #232a3d; box-shadow: inset 0 -1px 0 #2a3142; }
     /* 隐藏滚动条但保留滚动能力（Chrome/Safari/Edge/Firefox） */
     .scroll-table::-webkit-scrollbar,
     .worker-detail-modal .modal-body::-webkit-scrollbar { width: 0; height: 0; display: none; }
@@ -140,7 +142,7 @@ export const adminPageHtml = `<!DOCTYPE html>
     .apikey-meta-row strong { color: #b39ddb; margin-right: 4px; font-weight: 600; }
     .apikey-form-modal { width: min(92vw, 560px); height: auto; }
     .apikey-form-modal .modal-body { display: block; padding: 16px; overflow: visible; }
-    /* Worker 注册配对码结果展示：大字号、居中、可选中复制 */
+    /* Worker 授权码结果展示：大字号、居中、可选中复制 */
     .bootstrap-code-box { text-align: center; padding: 20px 0; }
     .bootstrap-code-box .code { display: inline-block; font-size: 36px; font-weight: 700; color: #81c784; font-family: Consolas, monospace; letter-spacing: 4px; user-select: all; padding: 16px 28px; background: #1a1f2e; border: 1px solid #2a3142; border-radius: 6px; }
     .bootstrap-result-box { display: flex; align-items: center; gap: 8px; background: #1a1f2e; border: 1px solid #2a3142; border-radius: 4px; padding: 10px 12px; }
@@ -174,7 +176,7 @@ export const adminPageHtml = `<!DOCTYPE html>
   <h2>Worker 节点</h2>
   <div class="scroll-table"><table id="workers"><tr><td class="empty">加载中...</td></tr></table></div>
 
-  <h2>Worker 注册配对码 <button class="btn-act" style="float:right;margin-top:4px" onclick="bootstrapTokenCreate()">生成配对码</button></h2>
+  <h2>Worker 授权码 <button class="btn-act" style="float:right;margin-top:4px" onclick="bootstrapTokenCreate()">生成授权码</button></h2>
   <div class="scroll-table"><table id="bootstrapTokens"><tr><td class="empty">加载中...</td></tr></table></div>
 
   <h2>PSD 渲染测试</h2>
@@ -258,7 +260,7 @@ export const adminPageHtml = `<!DOCTYPE html>
   </div>
 
   <div class="modal-mask" id="templateUploadModal">
-    <div class="modal license-modal"><div class="modal-header"><h3>上传 PSD 模板</h3><button class="btn-secondary" onclick="closeTemplateUpload()">关闭</button></div><div class="modal-body"><div class="form-row"><label>模板名称</label><input id="templateUploadName" maxlength="100" /></div><div class="form-row"><label>PSD 文件</label><input id="templateUploadFile" type="file" accept=".psd,image/vnd.adobe.photoshop" /></div><div class="form-row"><label>最低 Photoshop 版本</label><input id="templateUploadPsVersion" value="25.0" maxlength="20" /></div><div class="form-hint" id="templateUploadStatus"></div></div><div class="modal-footer"><span></span><div><button class="btn-secondary" onclick="closeTemplateUpload()">取消</button><button class="btn-primary" id="templateUploadSave" onclick="submitTemplateUpload()">上传并解析</button></div></div></div>
+    <div class="modal license-modal"><div class="modal-header"><h3>上传 PSD 模板</h3><button class="btn-secondary" onclick="closeTemplateUpload()">关闭</button></div><div class="modal-body"><div class="form-row"><label>模板名称</label><input id="templateUploadName" maxlength="100" /></div><div class="form-row"><label>PSD 文件</label><input id="templateUploadFile" type="file" accept=".psd,image/vnd.adobe.photoshop" /></div><div class="form-hint" style="margin-top:-6px">最大 300MB，仅支持 .psd 文件</div><div class="form-row"><label>最低 Photoshop 版本</label><input id="templateUploadPsVersion" value="25.0" maxlength="20" /></div><div class="form-hint" id="templateUploadStatus"></div></div><div class="modal-footer"><span></span><div><button class="btn-secondary" onclick="closeTemplateUpload()">取消</button><button class="btn-primary" id="templateUploadSave" onclick="submitTemplateUpload()">上传并解析</button></div></div></div>
   </div>
 
   <div class="modal-mask" id="confirmModal">
@@ -301,15 +303,15 @@ export const adminPageHtml = `<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Worker 注册配对码生成模态框 -->
+  <!-- Worker 授权码生成模态框 -->
   <div class="modal-mask" id="bootstrapTokenCreateModal">
     <div class="modal apikey-form-modal">
-      <div class="modal-header"><h3>生成 Worker 注册配对码</h3><button class="btn-secondary" onclick="closeBootstrapTokenCreate()">关闭</button></div>
+      <div class="modal-header"><h3>生成 Worker 授权码</h3><button class="btn-secondary" onclick="closeBootstrapTokenCreate()">关闭</button></div>
       <div class="modal-body">
         <div class="form-row">
           <label for="bootstrapTokenNote">备注（可选）</label>
-          <input id="bootstrapTokenNote" maxlength="200" placeholder="如：渲染节点A首次注册" />
-          <div class="form-hint">最多 200 个字符，便于后续识别该配对码的用途</div>
+          <input id="bootstrapTokenNote" maxlength="200" placeholder="如：渲染节点A首次激活" />
+          <div class="form-hint">最多 200 个字符，便于后续识别该授权码的用途</div>
         </div>
         <div class="form-hint" id="bootstrapTokenCreateStatus" style="color:#e57373;margin-top:8px"></div>
       </div>
@@ -317,12 +319,12 @@ export const adminPageHtml = `<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Worker 注册配对码结果模态框（大字号展示，提示立即在 Worker UI 中使用） -->
+  <!-- Worker 授权码结果模态框（大字号展示，提示立即在 Worker UI 中使用） -->
   <div class="modal-mask" id="bootstrapTokenResultModal">
     <div class="modal apikey-form-modal">
-      <div class="modal-header"><h3>配对码已生成</h3><button class="btn-secondary" onclick="closeBootstrapTokenResult()">关闭</button></div>
+      <div class="modal-header"><h3>授权码已生成</h3><button class="btn-secondary" onclick="closeBootstrapTokenResult()">关闭</button></div>
       <div class="modal-body">
-        <div class="apikey-result-warn">请立即在 Worker UI 的"首次注册"中输入此配对码。配对码 24 小时内有效，仅可使用一次。</div>
+        <div class="apikey-result-warn">请立即在 Worker UI 的"Worker 授权激活"中输入此授权码。授权码 24 小时内有效，仅可使用一次。</div>
         <div class="bootstrap-code-box">
           <span class="code" id="bootstrapTokenResultCode"></span>
         </div>
@@ -480,13 +482,16 @@ export const adminPageHtml = `<!DOCTYPE html>
       if (!onlineWorkers.length) { container.innerHTML = '<div class="empty">没有在线 Worker，无法提交指定节点测试</div>'; return; }
       const prevWorker = document.getElementById('testWorker')?.value;
       const prevFormat = document.getElementById('testOutputFormat')?.value;
+      const prevTimeout = document.getElementById('jsxTimeoutSeconds')?.value;
       const prevTemplate = document.getElementById('testTemplate')?.value;
       container.innerHTML = '<div class="form-row"><label>模板版本</label><select id="testTemplate" onchange="renderTestBindings()">' + testTemplates.map(t => '<option value="' + escapeHtml(t.templateVersionId) + '">' + escapeHtml(t.name) + ' v' + t.version + '</option>').join('') + '</select></div>' +
         '<div class="form-row"><label>指定 Worker</label><select id="testWorker">' + onlineWorkers.map(w => { const wc = w.customCode || w.code; return '<option value="' + escapeHtml(w.workerId) + '">' + escapeHtml(w.displayName || wc) + ' (' + escapeHtml(wc) + ')</option>'; }).join('') + '</select></div>' +
+        '<div class="form-row"><label>单任务 JSX 超时（秒）</label><input id="jsxTimeoutSeconds" type="number" min="60" max="3600" value="600" /><div class="form-hint">范围 60-3600 秒；默认 600 秒</div></div>' +
         '<div class="form-row"><label>导出格式</label><select id="testOutputFormat"><option value="png">PNG</option><option value="jpeg">JPEG</option><option value="psd">PSD</option></select></div><div id="testBindings"></div><button class="btn-primary" onclick="submitTestRender()">提交到指定 Worker</button><div class="form-hint" id="testRenderStatus"></div>';
       if (prevTemplate && testTemplates.some(t => t.templateVersionId === prevTemplate)) document.getElementById('testTemplate').value = prevTemplate;
       if (prevWorker && onlineWorkers.some(w => w.workerId === prevWorker)) document.getElementById('testWorker').value = prevWorker;
       if (prevFormat) document.getElementById('testOutputFormat').value = prevFormat;
+      if (prevTimeout) document.getElementById('jsxTimeoutSeconds').value = prevTimeout;
       renderTestBindings();
     }
 
@@ -514,14 +519,16 @@ export const adminPageHtml = `<!DOCTYPE html>
             if (text) input[id] = { text };
           } else if (field.files && field.files[0]) {
             const file = field.files[0];
-            const response = await fetch('/admin/api/test/assets?fileName=' + encodeURIComponent(file.name), { method: 'POST', headers: { 'Content-Type': file.type }, body: file });
+            const templateVersionId = document.getElementById('testTemplate').value;
+            const response = await fetch('/admin/api/test/assets?fileName=' + encodeURIComponent(file.name) + '&templateVersionId=' + encodeURIComponent(templateVersionId), { method: 'POST', headers: { 'Content-Type': file.type }, body: file });
             const data = await response.json();
             if (!response.ok) throw new Error(data.message || '图片上传失败');
             input[id] = { assetId: data.assetId };
           }
         }
         status.textContent = '正在提交给指定 Worker...';
-        const result = await fetchJSON('/admin/api/test/render-jobs', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ templateVersionId: document.getElementById('testTemplate').value, targetWorkerId: document.getElementById('testWorker').value, input, output: { format: document.getElementById('testOutputFormat').value } }) });
+        const jsxTimeoutSeconds = Number(document.getElementById('jsxTimeoutSeconds').value || 600);
+        const result = await fetchJSON('/admin/api/test/render-jobs', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ templateVersionId: document.getElementById('testTemplate').value, targetWorkerId: document.getElementById('testWorker').value, jsxTimeoutSeconds, input, output: { format: document.getElementById('testOutputFormat').value } }) });
         if (!result.jobId) throw new Error(result.message || '创建测试任务失败');
         status.textContent = '测试任务已提交：' + result.jobId;
         // 提交成功后重置使用标记，允许下次刷新重建表单
@@ -552,6 +559,7 @@ export const adminPageHtml = `<!DOCTYPE html>
         '<div class="form-row"><label>COS Region</label><input id="cosRegion" placeholder="ap-guangzhou" oninput="storageSettingsInUse=true" /></div>' +
         '<div class="form-row"><label>COS 内网域名</label><input id="cosDomain" oninput="storageSettingsInUse=true" /></div>' +
         '<div class="form-row"><label>预签名有效期（秒）</label><input id="cosExpires" type="number" min="60" max="604800" oninput="storageSettingsInUse=true" /></div>' +
+        '<div class="form-row"><label>任务URL有效期（秒）</label><input id="manifestExpires" type="number" min="60" max="604800" placeholder="600" oninput="storageSettingsInUse=true" /></div>' +
         '<div class="form-row"><label>SecretId</label><input id="cosSecretId" type="password" placeholder="' + (config.hasCosSecretId ? '已配置，留空保持不变' : '必填') + '" oninput="storageSettingsInUse=true" /></div>' +
         '<div class="form-row"><label>SecretKey</label><input id="cosSecretKey" type="password" placeholder="' + (config.hasCosSecretKey ? '已配置，留空保持不变' : '必填') + '" oninput="storageSettingsInUse=true" /></div>' +
         '<button class="btn-primary" onclick="saveStorageSettings()">保存并应用</button> <button class="btn-secondary" onclick="testStorageSettings()">测试配置</button><div class="form-hint" id="storageSettingsStatus"></div>';
@@ -561,10 +569,11 @@ export const adminPageHtml = `<!DOCTYPE html>
       document.getElementById('cosRegion').value = config.cosRegion || '';
       document.getElementById('cosDomain').value = config.cosInternalDomain || '';
       document.getElementById('cosExpires').value = config.cosPresignExpiresSec || 900;
+      document.getElementById('manifestExpires').value = config.manifestUrlExpiresSec || 600;
     }
 
     function storageSettingsPayload() {
-      return { backend: document.getElementById('storageBackend').value, localStorageDir: document.getElementById('storageLocalDir').value.trim(), cosBucket: document.getElementById('cosBucket').value.trim(), cosRegion: document.getElementById('cosRegion').value.trim(), cosInternalDomain: document.getElementById('cosDomain').value.trim(), cosPresignExpiresSec: Number(document.getElementById('cosExpires').value), cosSecretId: document.getElementById('cosSecretId').value, cosSecretKey: document.getElementById('cosSecretKey').value };
+      return { backend: document.getElementById('storageBackend').value, localStorageDir: document.getElementById('storageLocalDir').value.trim(), cosBucket: document.getElementById('cosBucket').value.trim(), cosRegion: document.getElementById('cosRegion').value.trim(), cosInternalDomain: document.getElementById('cosDomain').value.trim(), cosPresignExpiresSec: Number(document.getElementById('cosExpires').value), manifestUrlExpiresSec: Number(document.getElementById('manifestExpires').value), cosSecretId: document.getElementById('cosSecretId').value, cosSecretKey: document.getElementById('cosSecretKey').value };
     }
 
     async function saveStorageSettings() {
@@ -1195,6 +1204,13 @@ export const adminPageHtml = `<!DOCTYPE html>
       const button = document.getElementById('templateUploadSave');
       if (!name || !file) { status.textContent = '请填写模板名称并选择 PSD 文件'; return; }
       if (!file.name.toLowerCase().endsWith('.psd')) { status.textContent = '仅支持 .psd 文件'; return; }
+      // 前端 size 预检：避免大文件传完后才在后端被拒（须与后端 env.MAX_PSD_SIZE_MB 保持一致）
+      // 注意：本文件整体是模板字符串，内嵌 JS 须用单引号 + 拼接，不可用反引号/模板字面量
+      const PSD_MAX_MB = 300;
+      if (file.size > PSD_MAX_MB * 1024 * 1024) {
+        status.textContent = 'PSD 文件不能超过 ' + PSD_MAX_MB + 'MB（当前 ' + (file.size / 1024 / 1024).toFixed(1) + 'MB）';
+        return;
+      }
       button.disabled = true;
       status.textContent = '上传并解析 PSD 中，请勿关闭页面...';
       try {
@@ -1552,7 +1568,7 @@ export const adminPageHtml = `<!DOCTYPE html>
             +     '<option value="cover"' + (b.fit === 'cover' ? ' selected' : '') + '>cover（铺满，可能裁剪）</option>'
             +     '<option value="contain"' + (b.fit === 'contain' ? ' selected' : '') + '>contain（完整包含，可能留白）</option>'
             +   '</select>'
-            +   '<div class="form-hint">默认 stretch：将图片拉伸到目标尺寸，完全显示</div>'
+            +   '<div class="form-hint">默认 stretch：将图片像素拉伸到智能对象内部尺寸并完全铺满</div>'
             + '</div>' : '')
           + (isText ? ''
             + '<div class="form-row">'
@@ -1653,7 +1669,7 @@ export const adminPageHtml = `<!DOCTYPE html>
       }
     }
 
-    // ===== Worker 注册配对码管理 =====
+    // ===== Worker 授权码管理 =====
     let bootstrapTokensList = [];
 
     // 状态 → badge 样式与中文文案
@@ -1671,11 +1687,11 @@ export const adminPageHtml = `<!DOCTYPE html>
         const tokens = (r && r.tokens) || [];
         bootstrapTokensList = tokens;
         if (!tokens.length) {
-          document.getElementById('bootstrapTokens').innerHTML = '<tr><td class="empty">暂无配对码</td></tr>';
+          document.getElementById('bootstrapTokens').innerHTML = '<tr><td class="empty">暂无授权码</td></tr>';
           return;
         }
         document.getElementById('bootstrapTokens').innerHTML = \`
-          <thead><tr><th>配对码</th><th>状态</th><th>备注</th><th>创建人</th><th>创建时间</th><th>过期时间</th><th>使用时间</th><th>操作</th></tr></thead>
+          <thead><tr><th>授权码</th><th>状态</th><th>备注</th><th>创建人</th><th>创建时间</th><th>过期时间</th><th>使用时间</th><th>操作</th></tr></thead>
           <tbody>
           \${tokens.map(t => \`<tr>
             <td><code>\${escapeHtml(t.pairingCode)}</code></td>
@@ -1726,7 +1742,7 @@ export const adminPageHtml = `<!DOCTYPE html>
       }
     }
 
-    // 展示配对码结果弹框（大字号醒目展示 + 复制按钮）
+    // 展示授权码结果弹框（大字号醒目展示 + 复制按钮）
     function showBootstrapTokenResult(pairingCode) {
       document.getElementById('bootstrapTokenResultCode').textContent = pairingCode || '';
       document.getElementById('bootstrapTokenResultCodeText').textContent = pairingCode || '';
@@ -1740,7 +1756,7 @@ export const adminPageHtml = `<!DOCTYPE html>
       document.getElementById('bootstrapTokenResultModal').classList.remove('open');
     }
 
-    // 复制配对码到剪贴板
+    // 复制授权码到剪贴板
     async function copyBootstrapTokenResult() {
       const text = document.getElementById('bootstrapTokenResultCodeText').textContent;
       const btn = document.getElementById('bootstrapTokenResultCopyBtn');
@@ -1774,14 +1790,14 @@ export const adminPageHtml = `<!DOCTYPE html>
     }
 
     async function bootstrapTokenRevoke(id) {
-      if (!await showConfirm('确定作废该配对码？作废后该配对码将无法用于 Worker 注册。')) return;
+      if (!await showConfirm('确定作废该授权码？作废后该授权码将无法用于 Worker 激活。')) return;
       try {
         await fetchJSON('/admin/api/bootstrap-tokens/' + id, { method: 'DELETE' });
         loadBootstrapTokens();
       } catch (e) { alert('作废失败: ' + (e.message || '未知错误')); }
     }
     async function bootstrapTokenDelete(id) {
-      if (!await showConfirm('确定删除该配对码记录？此操作不可恢复。')) return;
+      if (!await showConfirm('确定删除该授权码记录？此操作不可恢复。')) return;
       try {
         await fetchJSON('/admin/api/bootstrap-tokens/' + id + '/delete', { method: 'POST' });
         loadBootstrapTokens();

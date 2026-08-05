@@ -62,12 +62,14 @@ const storageSettingsSchema = z.object({
   backend: z.enum(['local', 'cos']), localStorageDir: z.string().max(500).optional(),
   cosBucket: z.string().max(200).optional(), cosRegion: z.string().max(100).optional(),
   cosInternalDomain: z.string().max(500).optional(), cosPresignExpiresSec: z.number().int().min(60).max(604800).optional(),
+  manifestUrlExpiresSec: z.number().int().min(60).max(604800).optional(),
   cosSecretId: z.string().max(200).optional(), cosSecretKey: z.string().max(200).optional(),
 });
 const testRenderSchema = z.object({
   templateVersionId: z.string().min(1), targetWorkerId: z.string().min(1),
   input: z.record(z.string(), z.object({ assetId: z.string().optional(), text: z.string().optional() })),
   output: z.object({ format: z.enum(['png', 'jpeg', 'psd']), quality: z.number().int().min(1).max(100).optional() }),
+  jsxTimeoutSeconds: z.number().int().min(60).max(3600).default(600),
 });
 
 // M5：图层绑定配置保存 schema（与外部 API 一致）
@@ -92,6 +94,9 @@ const layerBindingsSchema = z.object({
 export async function adminWriteRoutes(app: FastifyInstance) {
   app.post('/api/templates/upload', {
     preHandler: [app.requireAdminAuth, app.requireRole('operator')],
+    // PSD 模板文件可达 300MB，路由级覆盖全局 bodyLimit（默认 150MB）
+    // 实际限额由 psd-worker assertFileSize + putObject 按前缀兜底
+    bodyLimit: env.MAX_PSD_SIZE_MB * 1024 * 1024,
     schema: {
       tags: ['admin-templates'],
       summary: '上传 PSD 模板',
@@ -109,10 +114,27 @@ export async function adminWriteRoutes(app: FastifyInstance) {
       response: {
         201: {
           type: 'object',
+          description: '创建成功，返回模板 ID、版本 ID、画布尺寸与图层树',
+          required: ['templateId', 'templateVersionId', 'canvas', 'layerTree'],
           properties: {
-            templateId: { type: 'string' },
-            version: { type: 'integer' },
-            layerSchema: { type: 'string', description: '图层树 JSON' },
+            // M1 修复：与 templateService.createFromUpload() 实际返回的 LayerTreeResult 对齐
+            //   原错误：声明 version:integer + layerSchema:string，但 service 返回
+            //   templateVersionId/canvas/layerTree（layerTree 是数组而非字符串）
+            templateId: { type: 'string', description: '模板 ID（tpl_xxx）' },
+            templateVersionId: { type: 'string', description: '模板版本 ID（tpv_xxx）' },
+            canvas: {
+              type: 'object',
+              description: 'PSD 画布尺寸',
+              properties: {
+                width: { type: 'integer' },
+                height: { type: 'integer' },
+              },
+            },
+            layerTree: {
+              type: 'array',
+              description: '解析得到的图层树（递归结构）',
+              items: { type: 'object', additionalProperties: true },
+            },
           },
         },
         400: { $ref: 'ErrorResponse#' },
@@ -148,7 +170,7 @@ export async function adminWriteRoutes(app: FastifyInstance) {
     schema: {
       tags: ['admin-tests'],
       summary: '测试用模板列表',
-      description: '返回已发布且已配置图层绑定的模板版本，用于测试渲染任务的下拉选择。仅返回未软删除模板的已发布版本。',
+      description: '返回所有租户中已发布且已配置图层绑定的模板版本，用于测试渲染任务的下拉选择。仅返回未软删除模板的已发布版本。',
       security: [{ adminSession: [] }],
       response: {
         200: {
@@ -173,8 +195,6 @@ export async function adminWriteRoutes(app: FastifyInstance) {
     },
   }, async (_req, reply) => {
     const versions = await prisma.templateVersion.findMany({
-      // 关联过滤：仅返回 published=true 且所属模板未被软删除（status != DELETED）的版本
-      // 原 where 仅过滤 published: true，导致已删除模板的已发布版本仍出现在测试下拉框中
       where: { published: true, template: { status: { not: 'DELETED' } } },
       include: { template: true }, orderBy: { createdAt: 'desc' },
     });
@@ -186,11 +206,15 @@ export async function adminWriteRoutes(app: FastifyInstance) {
     schema: {
       tags: ['admin-tests'],
       summary: '上传测试资产',
-      description: '上传测试用图片资产（PNG/JPG/JPEG/WEBP），写入 tenantId=admin-test 隔离空间。请求体为原始图片二进制。operator 及以上可调用。',
+      description: '上传测试用图片资产（PNG/JPG/JPEG/WEBP），写入指定模板版本所属租户。请求体为原始图片二进制。operator 及以上可调用。',
       security: [{ adminSession: [] }],
       querystring: {
         type: 'object',
-        properties: { fileName: { type: 'string', description: '图片文件名（默认 image.png）' } },
+        required: ['templateVersionId'],
+        properties: {
+          fileName: { type: 'string', description: '图片文件名（默认 image.png）' },
+          templateVersionId: { type: 'string', description: '当前测试模板版本 ID' },
+        },
       },
       response: {
         200: {
@@ -206,18 +230,24 @@ export async function adminWriteRoutes(app: FastifyInstance) {
     },
   }, async (req, reply) => {
     const fileName = String((req.query as any).fileName ?? 'image.png');
+    const templateVersionId = String((req.query as any).templateVersionId ?? '');
     const mimeType = String(req.headers['content-type'] ?? 'application/octet-stream').split(';')[0];
     // 允许常见图片格式（UI accept=image/png,image/jpeg，但服务端兼容更多类型避免误拒）
     if (!['image/png', 'image/jpeg', 'image/jpg', 'image/webp'].includes(mimeType)) return reply.code(400).send({ error: 'VALIDATION_ERROR', message: '仅支持 PNG、JPG、JPEG、WEBP 图片' });
     const body = req.body as Buffer;
     if (!Buffer.isBuffer(body) || body.length === 0 || body.length > env.MAX_INPUT_SIZE_MB * 1024 * 1024) return reply.code(400).send({ error: 'VALIDATION_ERROR', message: '图片内容为空或超过大小限制' });
+    const templateVersion = await prisma.templateVersion.findUnique({
+      where: { id: templateVersionId },
+      include: { template: true },
+    });
+    if (!templateVersion || !templateVersion.published || templateVersion.template.status === 'DELETED') {
+      return reply.code(400).send({ error: 'TEMPLATE_NOT_PUBLISHED', message: '模板版本不存在或未发布' });
+    }
     const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
     const storage = await getStorage();
     const objectKey = `input/test/${Date.now()}_${safeName}`;
     const meta = await storage.putObject({ objectKey, body, mimeType, contentLength: body.length });
-    // B-H11 修复：测试资产写入 tenantId='admin-test'，与 /api/test/render-jobs 一致，
-    //   避免测试产物因缺 tenantId 而无法被租户隔离查询过滤，污染正式数据空间。
-    const artifact = await prisma.artifact.create({ data: { code: genArtifactCode(), kind: 'input', objectKey, sha256: meta.sha256 ?? '', mimeType, sizeBytes: meta.size, originalName: fileName, tenantId: 'admin-test', expiresAt: new Date(Date.now() + env.INPUT_RETENTION_DAYS * 86400 * 1000) } });
+    const artifact = await prisma.artifact.create({ data: { code: genArtifactCode(), kind: 'input', objectKey, sha256: meta.sha256 ?? '', mimeType, sizeBytes: meta.size, originalName: fileName, tenantId: templateVersion.template.tenantId, expiresAt: new Date(Date.now() + env.INPUT_RETENTION_DAYS * 86400 * 1000) } });
     return reply.send({ assetId: artifact.code, originalName: artifact.originalName, sizeBytes: artifact.sizeBytes });
   });
 
@@ -226,7 +256,7 @@ export async function adminWriteRoutes(app: FastifyInstance) {
     schema: {
       tags: ['admin-tests'],
       summary: '创建测试渲染任务',
-      description: '创建指定 Worker 的测试渲染任务，写入 tenantId=admin-test 隔离空间。priority=1（最高优先级）。operator 及以上可调用。',
+      description: '创建指定 Worker 的测试渲染任务，写入所选模板版本所属租户。priority=1（最高优先级）。operator 及以上可调用。',
       security: [{ adminSession: [] }],
       body: {
         type: 'object',
@@ -252,6 +282,8 @@ export async function adminWriteRoutes(app: FastifyInstance) {
               quality: { type: 'integer', minimum: 1, maximum: 100 },
             },
           },
+          // M5 修复：与 zod testRenderSchema 中的 jsxTimeoutSeconds（默认 600）保持一致
+          jsxTimeoutSeconds: { type: 'integer', minimum: 60, maximum: 3600, description: '可选，Worker 执行 JSX 脚本的超时秒数（默认 600）' },
         },
       },
       response: {
@@ -269,7 +301,15 @@ export async function adminWriteRoutes(app: FastifyInstance) {
     const parsed = testRenderSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'VALIDATION_ERROR', message: '测试任务参数无效', details: parsed.error.issues });
     try {
-      const result = await renderJobService.create({ ...parsed.data, tenantId: 'admin-test', idempotencyKey: `admin-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, priority: 1, traceId: `test-${Date.now().toString(36)}` });
+      const templateVersion = await prisma.templateVersion.findUnique({
+        where: { id: parsed.data.templateVersionId },
+        include: { template: true },
+      });
+      if (!templateVersion || !templateVersion.published || templateVersion.template.status === 'DELETED') {
+        return reply.code(400).send({ error: 'TEMPLATE_NOT_PUBLISHED', message: '模板版本不存在或未发布' });
+      }
+      const tenantId = templateVersion.template.tenantId;
+      const result = await renderJobService.create({ ...parsed.data, tenantId, idempotencyKey: `admin-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, priority: 1, traceId: `test-${Date.now().toString(36)}` });
       auditService.recordFromReq(req, { action: 'test_render_job_create', refType: 'render_job', refId: result.job.id, message: `创建指定 Worker 测试任务: ${result.job.code}`, meta: { targetWorkerId: parsed.data.targetWorkerId, templateVersionId: parsed.data.templateVersionId } });
       return reply.code(201).send({ jobId: result.job.code, status: result.job.status });
     } catch (error: any) { return reply.code(400).send({ error: error.code ?? 'TEST_RENDER_ERROR', message: error.message }); }
@@ -311,6 +351,7 @@ export async function adminWriteRoutes(app: FastifyInstance) {
           cosRegion: { type: 'string', description: 'COS 区域' },
           cosInternalDomain: { type: 'string', description: 'COS 内网域名' },
           cosPresignExpiresSec: { type: 'integer', minimum: 60, maximum: 604800, description: '预签名 URL 有效期（秒）' },
+          manifestUrlExpiresSec: { type: 'integer', minimum: 60, maximum: 604800, description: '任务下载/上传 URL 有效期（秒），需大于 JSX 执行时间（默认600）' },
           cosSecretId: { type: 'string', description: 'COS SecretId' },
           cosSecretKey: { type: 'string', description: 'COS SecretKey' },
         },
@@ -1102,15 +1143,15 @@ export async function adminWriteRoutes(app: FastifyInstance) {
     }
   });
 
-  // ============== Worker 注册配对码 ==============
+  // ============== Worker 授权码 ==============
 
-  // 生成配对码（明文仅返回一次）
+  // 生成授权码（明文仅返回一次）
   app.post('/api/bootstrap-tokens', {
     preHandler: [app.requireAdminAuth, app.requireRole('operator')],
     schema: {
       tags: ['admin-bootstrap-tokens'],
-      summary: '生成 Worker 注册配对码',
-      description: '生成一次性注册配对码和完整 token。明文仅返回一次，请立即复制到 Worker UI。operator 及以上可调用。',
+      summary: '生成 Worker 授权码',
+      description: '生成一次性授权码和完整 token。明文仅返回一次，请立即复制到 Worker UI。operator 及以上可调用。',
       security: [{ adminSession: [] }],
       body: {
         type: 'object',
@@ -1123,7 +1164,7 @@ export async function adminWriteRoutes(app: FastifyInstance) {
           type: 'object',
           properties: {
             id: { type: 'string' },
-            pairingCode: { type: 'string', description: '6 位配对码（如 K9F-2X7），Worker UI 输入此码' },
+            pairingCode: { type: 'string', description: '6 位授权码（如 K9F-2X7），Worker UI 输入此码' },
             token: { type: 'string', description: '完整 token（64 字符 hex），备选用，通常无需手动输入' },
             createdBy: { type: 'string' },
             createdAt: { type: 'string', format: 'date-time' },
@@ -1139,18 +1180,18 @@ export async function adminWriteRoutes(app: FastifyInstance) {
     const created = await bootstrapTokenService.create({ createdBy, note });
     auditService.recordFromReq(req, {
       action: 'bootstrap_token_create', refType: 'worker', refId: created.id,
-      message: `生成 Worker 注册配对码${note ? `（备注: ${note}）` : ''}`,
+      message: `生成 Worker 授权码${note ? `（备注: ${note}）` : ''}`,
     });
     return reply.send(created);
   });
 
-  // 列出配对码
+  // 列出授权码
   app.get('/api/bootstrap-tokens', {
     preHandler: [app.requireAdminAuth],
     schema: {
       tags: ['admin-bootstrap-tokens'],
-      summary: '列出 Worker 注册配对码',
-      description: '列出所有配对码（按创建时间倒序，最多 100 条）。viewer 及以上可调用。',
+      summary: '列出 Worker 授权码',
+      description: '列出所有授权码（按创建时间倒序，最多 100 条）。viewer 及以上可调用。',
       security: [{ adminSession: [] }],
       response: {
         200: {
@@ -1183,13 +1224,13 @@ export async function adminWriteRoutes(app: FastifyInstance) {
     return reply.send({ tokens });
   });
 
-  // 作废配对码
+  // 作废授权码
   app.delete('/api/bootstrap-tokens/:id', {
     preHandler: [app.requireAdminAuth, app.requireRole('operator')],
     schema: {
       tags: ['admin-bootstrap-tokens'],
-      summary: '作废 Worker 注册配对码',
-      description: '作废未使用的配对码。已使用或已作废的配对码不受影响。operator 及以上可调用。',
+      summary: '作废 Worker 授权码',
+      description: '作废未使用的授权码。已使用或已作废的授权码不受影响。operator 及以上可调用。',
       security: [{ adminSession: [] }],
       params: { type: 'object', properties: { id: { type: 'string' } } },
       response: {
@@ -1202,18 +1243,18 @@ export async function adminWriteRoutes(app: FastifyInstance) {
     await bootstrapTokenService.revoke(id);
     auditService.recordFromReq(req, {
       action: 'bootstrap_token_revoke', refType: 'worker', refId: id,
-      message: `作废 Worker 注册配对码: ${id}`,
+      message: `作废 Worker 授权码: ${id}`,
     });
     return reply.send({ ok: true });
   });
 
-  // 硬删除配对码（仅允许已作废或已过期的令牌）
+  // 硬删除授权码（仅允许已作废或已过期的令牌）
   app.post('/api/bootstrap-tokens/:id/delete', {
     preHandler: [app.requireAdminAuth, app.requireRole('operator')],
     schema: {
       tags: ['admin-bootstrap-tokens'],
-      summary: '删除 Worker 注册配对码',
-      description: '硬删除已作废或已过期的配对码记录。仅 revoked 或 expired 状态可删除。operator 及以上可调用。',
+      summary: '删除 Worker 授权码',
+      description: '硬删除已作废或已过期的授权码记录。仅 revoked 或 expired 状态可删除。operator 及以上可调用。',
       security: [{ adminSession: [] }],
       params: { type: 'object', properties: { id: { type: 'string' } } },
       response: {
@@ -1227,7 +1268,7 @@ export async function adminWriteRoutes(app: FastifyInstance) {
       await bootstrapTokenService.delete(id);
       auditService.recordFromReq(req, {
         action: 'bootstrap_token_delete', refType: 'worker', refId: id,
-        message: `删除 Worker 注册配对码: ${id}`,
+        message: `删除 Worker 授权码: ${id}`,
       });
       return reply.send({ ok: true });
     } catch (e: any) {

@@ -175,6 +175,7 @@ model RenderJob {
   priority          Int      @default(5)
   attempt           Int      @default(0)
   maxAttempts       Int      @default(3)
+  jsxTimeoutSeconds Int      @default(600)
   requiredCapabilities String?
   targetWorkerId    String?
   cancelRequestedAt DateTime?

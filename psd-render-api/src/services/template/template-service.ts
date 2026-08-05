@@ -9,10 +9,12 @@ import { logger } from '../../lib/logger.js';
 import {
   genTemplateCode,
   genTemplateVersionCode,
+  genArtifactCode,
   sha256File,
 } from '../../lib/crypto.js';
 import { psdParser } from '../psd-parser/psd-parser.js';
 import { getStorage } from '../storage/index.js';
+import { psdUploadUrlExpiresSec } from '../../config/env.js';
 import { AppError, Errors } from '../../lib/errors.js';
 import type { LayerSchema, LayerTreeResult, LayerNode } from '../../types/index.js';
 import { getTemplateDisplayStatus } from './template-status.js';
@@ -21,14 +23,28 @@ class TemplateService {
   /**
    * 生成 PSD 上传预签名地址
    */
-  async getUploadUrl(opts: { fileName: string; mimeType?: string }) {
+  async getUploadUrl(opts: { fileName: string; mimeType?: string; tenantId?: string }) {
     const storage = await getStorage();
     const objectKey = `psd/${Date.now()}_${path.basename(opts.fileName)}`;
     const result = await storage.generateUploadUrl({
       objectKey,
       mimeType: opts.mimeType ?? 'image/vnd.adobe.photoshop',
-      expiresInSec: 600,
+      expiresInSec: psdUploadUrlExpiresSec,
     });
+    if (opts.tenantId) {
+      await prisma.artifact.create({
+        data: {
+          code: genArtifactCode(),
+          kind: 'template_upload',
+          objectKey,
+          sha256: '',
+          mimeType: opts.mimeType ?? 'image/vnd.adobe.photoshop',
+          sizeBytes: 0,
+          expiresAt: new Date(Date.now() + psdUploadUrlExpiresSec * 1000),
+          tenantId: opts.tenantId,
+        },
+      });
+    }
     return {
       uploadUrl: result.uploadUrl,
       method: result.method,
@@ -42,6 +58,7 @@ class TemplateService {
   async createFromUpload(opts: { fileName: string; name: string; body: Buffer; psMinVersion?: string; tenantId?: string }) {
     if (!opts.fileName.toLowerCase().endsWith('.psd')) throw Errors.validationError('仅支持 .psd 模板文件');
     const storage = await getStorage();
+
     const safeName = path.basename(opts.fileName).replace(/[^a-zA-Z0-9._\u4e00-\u9fa5-]/g, '_');
     const objectKey = `psd/${Date.now()}_${safeName}`;
     await storage.putObject({
@@ -49,6 +66,18 @@ class TemplateService {
       body: opts.body,
       mimeType: 'image/vnd.adobe.photoshop',
       contentLength: opts.body.length,
+    });
+    await prisma.artifact.create({
+      data: {
+        code: genArtifactCode(),
+        kind: 'template_upload',
+        objectKey,
+        sha256: '',
+        mimeType: 'image/vnd.adobe.photoshop',
+        sizeBytes: opts.body.length,
+        expiresAt: new Date(Date.now() + psdUploadUrlExpiresSec * 1000),
+        tenantId: opts.tenantId ?? 'default',
+      },
     });
     try {
       // Admin 上传的模板归入 default 租户（平台共享）
@@ -76,6 +105,12 @@ class TemplateService {
       throw Errors.validationError('objectKey 必须为 psd/ 前缀的合法路径');
     }
     const storage = await getStorage();
+    const upload = await prisma.artifact.findFirst({
+      where: { objectKey: opts.objectKey, kind: 'template_upload', tenantId: opts.tenantId, jobId: null, sha256: '' },
+    });
+    if (!upload) throw Errors.validationError('PSD 上传记录不存在或不属于当前租户');
+    const uploadedMeta = await storage.headObject(opts.objectKey);
+    if (!uploadedMeta) throw Errors.validationError('PSD 文件尚未上传完成');
 
     // 下载 PSD 到临时文件
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'psd-parse-'));
@@ -88,6 +123,10 @@ class TemplateService {
       const buffer = await storage.getObject(opts.objectKey);
       await fs.writeFile(tmpFile, buffer);
       const psdSha256 = await sha256File(tmpFile);
+      await prisma.artifact.update({
+        where: { id: upload.id },
+        data: { sha256: psdSha256, sizeBytes: uploadedMeta.size, mimeType: uploadedMeta.mimeType },
+      });
 
       // 创建模板（草稿）+ 版本
       const template = await prisma.template.create({

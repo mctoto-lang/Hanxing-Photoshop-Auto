@@ -36,3 +36,9 @@ Thumbs.db
 # 测试报告(可能含敏感密钥)
 api-test-report.txt
 **/api-test-report.txt
+
+# 临时调试产物
+.dbg/
+.trae/
+debug-*.md
+psd-render-api/_*.cjs

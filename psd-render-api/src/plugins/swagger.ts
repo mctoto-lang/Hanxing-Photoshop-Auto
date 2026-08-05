@@ -94,17 +94,19 @@ export default fp(async (app) => {
             bearerFormat: 'wkr_xxx',
           },
           // P0 修复（严重3）：补充自定义 securityScheme 表达 storage/worker register 鉴权模型
+          // L5 修复：移除"也支持 ?token= 查询参数"的过期描述——storage.ts 实际只接受
+          //   Authorization: Bearer 头（P0 安全修复中危11 已彻底弃用 query string 传 token）
           storageSignedToken: {
             type: 'apiKey',
             in: 'header',
             name: 'Authorization',
-            description: '存储签名令牌（格式：Bearer <token>，由 generateUploadUrl/generateDownloadUrl 签发，仅 local 模式可用。也支持 ?token= 查询参数，但不推荐）',
+            description: '存储签名令牌（格式：Bearer <token>，由 generateUploadUrl/generateDownloadUrl 签发，仅 local 模式可用。仅接受 Authorization 头传递，不支持 query 参数）',
           },
           workerRegisterSecret: {
             type: 'apiKey',
             in: 'header',
             name: 'Authorization',
-            description: 'Worker 注册凭据（格式：Bearer <WORKER_REGISTER_SECRET> 或一次性配对码/token，也可通过 X-Worker-Register-Secret 头传递）',
+            description: 'Worker 注册凭据（格式：Bearer <WORKER_REGISTER_SECRET> 或一次性授权码/token，也可通过 X-Worker-Register-Secret 头传递）',
           },
         },
       },

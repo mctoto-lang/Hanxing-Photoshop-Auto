@@ -10,14 +10,15 @@
  *   - 中危9：input/ 路径下上传完成后做魔数校验，挡掉伪装成 png 的 HTML/JS
  *   - 中危11：token 改为 Authorization Bearer 头传递，避免 query string 进入日志/Referer
  *
- * P2-D 修复：默认仅接受 Authorization: Bearer 头携带 token；
- *   仍保留 ?token= 兼容老 Worker，但记 warn 提示升级（兼容窗口期）。
+ * P2-D 修复：仅接受 Authorization: Bearer 头携带 token；
+ *   早期版本曾保留 ?token= 兼容老 Worker，中危11 修复后已彻底移除。
  */
 import { FastifyInstance } from 'fastify';
 import { getStorage } from '../services/storage/index.js';
 import { LocalStorageService } from '../services/storage/local-storage.js';
 import { logger } from '../lib/logger.js';
 import { prisma } from '../lib/prisma.js';
+import { env } from '../config/env.js';
 
 /** 文件魔数 → mimeType 映射（前 8 字节足够区分 JPEG/PNG/PSD） */
 const MAGIC_JPEG = Buffer.from([0xff, 0xd8, 0xff]);
@@ -46,18 +47,19 @@ export async function storageRoutes(app: FastifyInstance) {
   /**
    * 上传：客户端 PUT 文件到此端点
    *
-   * token 来源优先级（P2-D）：
-   *   1. Authorization: Bearer <token> 头（推荐 + 默认）
-   *   2. ?token= 查询参数（仅兼容老 Worker，记 warn 提示升级）
+   * token 仅通过 Authorization: Bearer <token> 头传递。
    */
   app.put('/storage/upload', {
+    // 该端点同时服务 input/（≤150MB）与 psd/（≤300MB）对象，
+    // 取两者最大值作为 body 上限；实际限额由 putObject 按前缀兜底
+    bodyLimit: Math.max(env.MAX_INPUT_SIZE_MB, env.MAX_PSD_SIZE_MB) * 1024 * 1024,
     schema: {
       tags: ['storage'],
       summary: '上传文件至本地存储（local 模式专用）',
       description: [
         '校验签名令牌后直接写入本地文件系统，模拟 COS 预签名 URL 行为。',
         '',
-        '**鉴权**：通过 `Authorization: Bearer <token>` 头或 `?token=` 查询参数携带上传令牌（header 推荐）。',
+        '**鉴权**：通过 `Authorization: Bearer <token>` 头携带上传令牌。',
         '',
         '**安全校验**：',
         '- `input/` 路径：强制魔数校验（仅接受 JPEG/PNG），挡掉伪装成图片的 HTML/JS',
@@ -72,7 +74,6 @@ export async function storageRoutes(app: FastifyInstance) {
         required: ['key'],
         properties: {
           key: { type: 'string', description: '对象键（如 input/xxx.png、output/yyy.png）' },
-          token: { type: 'string', description: '下载/上传令牌（兼容旧 Worker，推荐改用 Authorization 头）' },
         },
       },
       headers: {
@@ -101,21 +102,13 @@ export async function storageRoutes(app: FastifyInstance) {
     },
   }, async (req, reply) => {
     const key = (req.query as any).key as string;
-    // 中危11：优先从 Authorization 头读取 token，fallback 到 query
+    // Storage tokens are accepted only through Authorization headers.
     const authHeader = req.headers.authorization;
     const headerToken =
       typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
         ? authHeader.slice(7)
         : undefined;
-    const queryToken = (req.query as any).token as string | undefined;
-    // P2-D：query token 进入日志/Referer，记 warn 提示调用方升级到 header 模式
-    const token = headerToken ?? queryToken;
-    if (queryToken && !headerToken) {
-      logger.warn({
-        objectKey: key,
-        msg: '上传请求使用 query token（已废弃，请改用 Authorization: Bearer 头）',
-      });
-    }
+    const token = headerToken;
 
     if (!key || !token) {
       return reply.code(400).send({ error: 'MISSING_PARAMS', message: '缺少 key 或 token' });
@@ -213,7 +206,7 @@ export async function storageRoutes(app: FastifyInstance) {
       description: [
         '校验签名令牌后从本地文件系统读取文件并返回二进制流，模拟 COS 预签名 URL 行为。',
         '',
-        '**鉴权**：通过 `Authorization: Bearer <token>` 头或 `?token=` 查询参数携带下载令牌（header 推荐）。',
+        '**鉴权**：通过 `Authorization: Bearer <token>` 头携带下载令牌。',
         '',
         '**响应**：返回文件二进制流，`Content-Type` 为文件实际 MIME 类型，`Content-Disposition: inline` 便于浏览器内联预览。',
         '',
@@ -226,7 +219,6 @@ export async function storageRoutes(app: FastifyInstance) {
         required: ['key'],
         properties: {
           key: { type: 'string', description: '对象键（如 input/xxx.png、output/yyy.png）' },
-          token: { type: 'string', description: '下载令牌（兼容旧 Worker，推荐改用 Authorization 头）' },
         },
       },
       headers: {
@@ -248,21 +240,13 @@ export async function storageRoutes(app: FastifyInstance) {
     },
   }, async (req, reply) => {
     const key = (req.query as any).key as string;
-    // 中危11：优先从 Authorization 头读取 token
+    // Storage tokens are accepted only through Authorization headers.
     const authHeader = req.headers.authorization;
     const headerToken =
       typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
         ? authHeader.slice(7)
         : undefined;
-    const queryToken = (req.query as any).token as string | undefined;
-    // P2-D：query token 进入日志/Referer，记 warn 提示调用方升级
-    const token = headerToken ?? queryToken;
-    if (queryToken && !headerToken) {
-      logger.warn({
-        objectKey: key,
-        msg: '下载请求使用 query token（已废弃，请改用 Authorization: Bearer 头）',
-      });
-    }
+    const token = headerToken;
 
     if (!key || !token) {
       return reply.code(400).send({ error: 'MISSING_PARAMS', message: '缺少 key 或 token' });

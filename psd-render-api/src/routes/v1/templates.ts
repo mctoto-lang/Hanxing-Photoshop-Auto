@@ -11,6 +11,7 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { templateService } from '../../services/template/template-service.js';
+import { env } from '../../config/env.js';
 import type { LayerSchema } from '../../types/index.js';
 
 export async function templateRoutes(app: FastifyInstance) {
@@ -28,6 +29,8 @@ export async function templateRoutes(app: FastifyInstance) {
         properties: {
           fileName: { type: 'string', minLength: 1, description: 'PSD 文件名（含 .psd 扩展名）' },
           mimeType: { type: 'string', description: '可选，默认 image/vnd.adobe.photoshop' },
+          // 可选：声明文件大小（字节），超限直接 400，避免客户端传完才在存储层报错
+          sizeBytes: { type: 'integer', format: 'int64', minimum: 1, maximum: env.MAX_PSD_SIZE_MB * 1024 * 1024, description: `可选，文件大小（字节，上限 ${env.MAX_PSD_SIZE_MB}MB）` },
         },
       },
       response: {
@@ -57,6 +60,7 @@ export async function templateRoutes(app: FastifyInstance) {
     const result = await templateService.getUploadUrl({
       fileName,
       mimeType: body.mimeType,
+      tenantId: req.user?.tenantId,
     });
     return reply.send(result);
   });
@@ -85,14 +89,29 @@ export async function templateRoutes(app: FastifyInstance) {
         },
       },
       // P0 修复（严重5）：补齐缺失的 response schema
+      // C2 修复：与 templateService.createFromPsd() 实际返回的 LayerTreeResult 对齐
+      //   原错误：声明 version/layerSchema 字段，但 service 返回 templateVersionId/canvas/layerTree
       response: {
         200: {
           type: 'object',
-          description: '创建成功，返回模板 ID 与解析得到的图层树',
+          description: '创建成功，返回模板 ID、版本 ID、画布尺寸与图层树',
+          required: ['templateId', 'templateVersionId', 'canvas', 'layerTree'],
           properties: {
             templateId: { type: 'string', description: '模板 ID（tpl_xxx）' },
-            version: { type: 'integer', description: '版本号（首个版本为 1）' },
-            layerSchema: { type: 'object', additionalProperties: true, description: '解析得到的图层树结构' },
+            templateVersionId: { type: 'string', description: '模板版本 ID（tpv_xxx），后续提交渲染任务时使用' },
+            canvas: {
+              type: 'object',
+              description: 'PSD 画布尺寸',
+              properties: {
+                width: { type: 'integer', description: '画布宽度（像素）' },
+                height: { type: 'integer', description: '画布高度（像素）' },
+              },
+            },
+            layerTree: {
+              type: 'array',
+              description: '解析得到的图层树（递归结构，每个节点含 layerId/layerPath/name/type/bounds/visible/children 等）',
+              items: { type: 'object', additionalProperties: true },
+            },
           },
         },
         400: { $ref: 'ErrorResponse#' },
@@ -262,7 +281,7 @@ export async function templateRoutes(app: FastifyInstance) {
     schema: {
       tags: ['templates'],
       summary: '模板列表',
-      description: '获取所有模板（含状态、版本数量）。',
+      description: '获取当前租户下所有未软删除的模板（含状态、最新版本号、发布标志、缩略图 key）。',
       security: [{ apiKey: [] }],
       response: {
         200: {
@@ -271,7 +290,21 @@ export async function templateRoutes(app: FastifyInstance) {
           properties: {
             templates: {
               type: 'array',
-              items: { type: 'object', additionalProperties: true },
+              items: {
+                type: 'object',
+                required: ['templateId', 'code', 'name', 'status', 'statusLabel', 'latestVersion', 'published', 'thumbnailObjectKey', 'createdAt'],
+                properties: {
+                  templateId: { type: 'string', description: '模板 ID（tpl_xxx）' },
+                  code: { type: 'string', description: '模板编码' },
+                  name: { type: 'string', description: '模板名称' },
+                  status: { type: 'string', description: '模板状态' },
+                  statusLabel: { type: 'string', description: '状态中文标签' },
+                  latestVersion: { type: 'integer', description: '最新版本号（从 1 起，无版本时为 0）' },
+                  published: { type: 'boolean', description: '最新版本是否已发布' },
+                  thumbnailObjectKey: { type: 'string', nullable: true, description: '缩略图对象 key（无缩略图时为 null）' },
+                  createdAt: { type: 'string', format: 'date-time', description: '模板创建时间' },
+                },
+              },
             },
           },
         },
@@ -296,7 +329,7 @@ export async function templateRoutes(app: FastifyInstance) {
     schema: {
       tags: ['templates'],
       summary: '模板详情',
-      description: '获取模板详情，含图层树、绑定配置、版本列表。',
+      description: '获取模板详情，含最新版本的图层树、绑定配置、画布尺寸与缩略图。',
       security: [{ apiKey: [] }],
       params: {
         type: 'object',
@@ -305,20 +338,50 @@ export async function templateRoutes(app: FastifyInstance) {
         },
       },
       // P0 修复（严重5）：补齐缺失的 response schema
+      // C3 修复：与 templateService.getDetail() 实际返回对齐
+      //   原错误：声明 versions:array + 顶层 layerSchema，但 service 返回 latestVersion:object|null
+      //   且 layerSchema 嵌套在 latestVersion 内部，并非版本列表
       response: {
         200: {
           type: 'object',
-          description: '模板详情，含图层树、绑定配置、版本列表',
+          description: '模板详情，含最新版本的图层树、绑定配置、画布尺寸与缩略图',
+          required: ['templateId', 'code', 'name', 'status', 'latestVersion'],
           properties: {
-            templateId: { type: 'string' },
-            code: { type: 'string' },
-            name: { type: 'string' },
-            status: { type: 'string', description: 'DRAFT | PUBLISHED | ARCHIVED | DELETED' },
-            versions: {
-              type: 'array',
-              items: { type: 'object', additionalProperties: true },
+            templateId: { type: 'string', description: '模板 ID（tpl_xxx）' },
+            code: { type: 'string', description: '模板编码' },
+            name: { type: 'string', description: '模板名称' },
+            status: { type: 'string', description: '模板状态（DRAFT / PUBLISHED / REPUBLISH_REQUIRED / ARCHIVED / DELETED 等）' },
+            latestVersion: {
+              type: 'object',
+              nullable: true,
+              description: '最新版本详情；模板刚创建无版本时为 null',
+              properties: {
+                versionId: { type: 'string', description: '模板版本 ID（tpv_xxx）' },
+                version: { type: 'integer', description: '版本号（从 1 起）' },
+                published: { type: 'boolean', description: '该版本是否已发布' },
+                canvas: {
+                  type: 'object',
+                  description: '画布尺寸',
+                  properties: {
+                    width: { type: 'integer' },
+                    height: { type: 'integer' },
+                  },
+                },
+                psMinVersion: { type: 'string', description: '最低 PS 版本要求' },
+                layerTree: {
+                  type: 'array',
+                  description: '图层树（递归结构）',
+                  items: { type: 'object', additionalProperties: true },
+                },
+                layerSchema: {
+                  type: 'object',
+                  additionalProperties: true,
+                  description: '图层绑定配置（含 bindings 数组）',
+                },
+                thumbnailObjectKey: { type: 'string', nullable: true, description: '缩略图对象 key（无缩略图时为 null）' },
+                createdAt: { type: 'string', format: 'date-time', description: '版本创建时间' },
+              },
             },
-            layerSchema: { type: 'object', additionalProperties: true },
           },
         },
         401: { $ref: 'ErrorResponse#', description: 'API Key 无效或缺少 tenantId' },

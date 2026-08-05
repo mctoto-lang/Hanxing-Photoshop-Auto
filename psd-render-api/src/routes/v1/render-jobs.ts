@@ -37,6 +37,7 @@ const createSchema = z.object({
     quality: z.number().int().min(1).max(100).optional(),
   }).default({ format: 'png' }),
   priority: z.number().int().min(1).max(10).optional(),
+  jsxTimeoutSeconds: z.number().int().min(60).max(3600).optional(),
   webhookUrl: webhookUrlSchema.optional(),
   // 第二期：能力路由要求（可选；不传则任何 Worker 可领）
   requiredCapabilities: z.object({
@@ -98,6 +99,9 @@ export async function renderJobRoutes(app: FastifyInstance) {
             default: { format: 'png' },
           },
           priority: { type: 'integer', minimum: 1, maximum: 10, description: '优先级（数字越小优先级越高，默认 5）' },
+          // C5 修复：补齐与 zod createSchema 一致的 jsxTimeoutSeconds 字段
+          //   原 OpenAPI 漏掉此字段，客户端无法发现可调整 JSX 执行超时
+          jsxTimeoutSeconds: { type: 'integer', minimum: 60, maximum: 3600, description: '可选，Worker 执行 JSX 脚本的超时秒数（默认 600，范围 60-3600）' },
           webhookUrl: { type: 'string', format: 'uri', description: '可选，任务终态时回调此地址' },
           requiredCapabilities: {
             type: 'object',
@@ -175,6 +179,7 @@ export async function renderJobRoutes(app: FastifyInstance) {
       priority: parsed.data.priority,
       webhookUrl: parsed.data.webhookUrl,
       requiredCapabilities: parsed.data.requiredCapabilities,
+      jsxTimeoutSeconds: parsed.data.jsxTimeoutSeconds,
       traceId,
     });
 
@@ -207,14 +212,29 @@ export async function renderJobRoutes(app: FastifyInstance) {
           type: 'object',
           required: ['jobId', 'status'],
           properties: {
-            jobId: { type: 'string' },
-            code: { type: 'string' },
+            jobId: { type: 'string', description: '任务编码（job_xxx）' },
             status: { type: 'string', description: 'QUEUED | LEASED | PROCESSING | SUCCEEDED | FAILED | CANCELLING | CANCELLED' },
-            progress: { type: 'integer' },
-            stage: { type: 'string' },
-            resultUrl: { type: 'string', description: '结果下载地址（SUCCEEDED 时返回，3 天有效）' },
-            errorCode: { type: 'string' },
-            errorMessage: { type: 'string' },
+            attempt: { type: 'integer', description: '尝试次数（从 1 起，每次重试 +1）' },
+            priority: { type: 'integer', description: '优先级（1-10，数字越小优先级越高）' },
+            stage: { type: 'string', nullable: true, description: '当前执行阶段（DOWNLOAD / RUN_JSX / EXPORT / UPLOAD）' },
+            progress: { type: 'integer', description: '执行进度（0-100）' },
+            template: {
+              type: 'object',
+              description: '模板信息',
+              properties: {
+                name: { type: 'string', description: '模板名称' },
+                version: { type: 'string', description: '模板版本 ID' },
+              },
+            },
+            resultUrl: { type: 'string', description: '结果下载地址（SUCCEEDED 时返回，默认 3 天有效，由 OUTPUT_RETENTION_DAYS 控制）' },
+            resultExpiresAt: { type: 'string', format: 'date-time', nullable: true, description: '结果下载地址过期时间' },
+            errorCode: { type: 'string', nullable: true, description: '失败时的错误码' },
+            errorMessage: { type: 'string', nullable: true, description: '失败时的错误详情' },
+            createdAt: { type: 'string', format: 'date-time', description: '任务创建时间' },
+            updatedAt: { type: 'string', format: 'date-time', description: '任务最后更新时间' },
+            queuedAt: { type: 'string', format: 'date-time', nullable: true, description: '入队时间' },
+            succeededAt: { type: 'string', format: 'date-time', nullable: true, description: '成功完成时间' },
+            failedAt: { type: 'string', format: 'date-time', nullable: true, description: '失败时间' },
           },
         },
         401: { $ref: 'ErrorResponse#', description: 'API Key 无效或缺失' },

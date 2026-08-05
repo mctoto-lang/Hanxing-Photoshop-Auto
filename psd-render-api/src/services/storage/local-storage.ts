@@ -107,7 +107,12 @@ export class LocalStorageService implements StorageService {
     //   原实现仅依赖路由层 Fastify bodyLimit 兜底，但内部服务调用（如 template-service、
     //   test/assets）绕过路由层 body parser 时无任何限制，恶意超大流会把整个内容加载到内存导致 OOM。
     //   现在统一以 env.MAX_INPUT_SIZE_MB 为上限，超过即拒绝。
-    const maxBytes = env.MAX_INPUT_SIZE_MB * 1024 * 1024;
+    // PSD 限额隔离：psd/ 前缀对象（PSD 模板）走 MAX_PSD_SIZE_MB（默认 300MB），
+    //   其余（input/、output/、thumbnails/）仍走 MAX_INPUT_SIZE_MB（默认 150MB），
+    //   避免 PSD 大文件限额放宽连带放宽输入资产限额。
+    const maxBytes = opts.objectKey.startsWith('psd/')
+      ? env.MAX_PSD_SIZE_MB * 1024 * 1024
+      : env.MAX_INPUT_SIZE_MB * 1024 * 1024;
 
     // P2-J 修复：流式 body 改为写入临时文件，避免 chunks: Buffer[] 累计到 maxBytes（150MB）
     //   才抛错。原实现在内存中累计所有 chunks，10 并发上传就是 1.5GB 内存。

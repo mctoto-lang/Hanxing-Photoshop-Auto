@@ -147,7 +147,10 @@ export async function adminRoutes(app: FastifyInstance) {
                   stage: { type: 'string' },
                   progress: { type: 'integer' },
                   errorCode: { type: 'string', nullable: true },
-                  template: { type: 'object', additionalProperties: true },
+                  // 修复：handler 实际返回 j.templateVersion.template.name（字符串），
+                  //   原 schema 声明为 type:'object' 导致 fast-json-stringify 按字符索引
+                  //   把字符串序列化为 {"0":"挂","1":"历",...} 对象，前端 escapeHtml 后显示 [object Object]
+                  template: { type: 'string' },
                   worker: { type: 'object', nullable: true },
                   workerCustomCode: { type: 'string', nullable: true },
                   workerDisplayName: { type: 'string', nullable: true },

@@ -74,6 +74,12 @@ const schema = z.object({
   REDIS_URL: z.string().optional().default(''),
   // P2-6：租约 TTL 至少 30 秒，防止误配过小导致任务频繁失败
   LEASE_TTL_SECONDS: z.coerce.number().int().min(30).default(90),
+  // manifest（任务下载/上传预签名 URL）有效期（秒）。
+  //   原 job-service 用 LEASE_TTL_SECONDS*3（=270s）作有效期，但带蒙版智能对象
+  //   JSX 耗时 271~286s 会踩线导致上传 URL 过期（403 Request has expired）。
+  //   独立配置项默认 600s，可被 Admin UI 的 StorageConfig.manifestUrlExpiresSec 覆盖。
+  //   需大于 JSX 最长执行时间（worker 超时 5min=300s，故 600s 留足余量）。
+  MANIFEST_URL_EXPIRES_SEC: z.coerce.number().int().min(60).max(604800).default(600),
   // P2-6：心跳间隔 10-300 秒
   HEARTBEAT_INTERVAL_SECONDS: z.coerce.number().int().min(10).max(300).default(30),
   MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(3),
@@ -96,12 +102,25 @@ const schema = z.object({
   //   误设为 'abc' 时 Number('abc')=NaN，size > NaN 恒为 false，大小保护失效，
   //   恶意 PSD 可绕过大小限制导致 worker_threads OOM 或主进程内存耗尽。
   //   现纳入 zod schema，启动时 fail-fast 阻止非法值。
-  // PSD 文件大小上限（MB）：1-500MB，默认 50MB
-  MAX_PSD_SIZE_MB: z.coerce.number().int().min(1).max(500).default(50),
+  // PSD 文件大小上限（MB）：1-500MB，默认 300MB
+  //   同时作为 PSD 上传/存储/解析三层的统一限额（psd/ 前缀对象走此值，
+  //   input/ 等其他对象仍走 MAX_INPUT_SIZE_MB，互不影响）。
+  MAX_PSD_SIZE_MB: z.coerce.number().int().min(1).max(500).default(300),
   // PSD 图层嵌套深度上限：1-1000，默认 100（防止恶意嵌套导致栈溢出）
   PSD_MAX_LAYER_DEPTH: z.coerce.number().int().min(1).max(1000).default(100),
   // PSD 图层总数上限：1-50000，默认 5000（防止恶意 PSD 导致 OOM）
   PSD_MAX_LAYER_COUNT: z.coerce.number().int().min(1).max(50000).default(5000),
+  // PSD 解析超时（毫秒）：30s-10min，默认 180s。
+  //   原硬编码 60s 对 300MB 大文件不够（psd.parse + ag-psd 解码耗时），
+  //   触限后 worker 被 terminate，runInWorker 捕获返回 422。
+  PSD_PARSE_TIMEOUT_MS: z.coerce.number().int().min(30000).max(600000).default(180000),
+  // PSD 解析并发上限：1-8，默认 2。
+  //   单次 300MB 解析峰值内存 ~1.2-1.5GB（body+readFile+worker 解码），
+  //   并发 2 峰值 ~2.4-3GB；2GB 服务器建议设 1。由 psd-parser 信号量强制。
+  PSD_PARSE_CONCURRENCY: z.coerce.number().int().min(1).max(8).default(2),
+  // PSD 上传预签名 URL 有效期（秒）：60-3600，默认 1200（20min）。
+  //   原硬编码 600s 对慢网络传 300MB 偏紧，调高更从容。
+  PSD_UPLOAD_URL_EXPIRES_SEC: z.coerce.number().int().min(60).max(3600).default(1200),
 
   // ===== 第三期 M3：Admin UI 鉴权 =====
   // Admin session 有效期（小时）；上限 72h 防止 session 被劫持后长期可用
@@ -168,10 +187,10 @@ if (parsed.data.STORAGE_BACKEND === 'cos') {
     process.exit(1);
   }
 }
-// Worker 注册鉴权：生产环境必须配置 WORKER_REGISTER_SECRET 或使用配对码模式
-//   - 配对码模式（推荐）：管理员在 Admin UI 生成一次性配对码，Worker UI 输入注册
+// Worker 注册鉴权：生产环境必须配置 WORKER_REGISTER_SECRET 或使用授权码模式
+//   - 授权码模式（推荐）：管理员在 Admin UI 生成一次性授权码，Worker UI 输入激活连接
 //   - 长期密钥模式：配置 WORKER_REGISTER_SECRET，与 Worker config.json 一致
-//   两种模式可共存，配对码优先校验。生产环境不再强制配置 WORKER_REGISTER_SECRET。
+//   两种模式可共存，授权码优先校验。生产环境不再强制配置 WORKER_REGISTER_SECRET。
 // P0 高危修复（H2）：生产环境必须启用 Admin 鉴权，禁止降级为 POC 无鉴权模式。
 //   原实现仅在 ADMIN_AUTH_ENABLED=true 时校验 ADMIN_BOOTSTRAP_PASSWORD，
 //   运维若误设 ADMIN_AUTH_ENABLED=false 会跳过校验导致生产环境 Admin UI 完全无鉴权。
@@ -226,6 +245,15 @@ export const corsOrigins = env.CORS_ORIGINS.split(',')
   .filter(Boolean);
 
 export const maxInputSizeBytes = env.MAX_INPUT_SIZE_MB * 1024 * 1024;
+
+/** PSD 文件大小上限（字节）：psd/ 前缀对象的存储/上传/解析统一限额 */
+export const maxPsdSizeBytes = env.MAX_PSD_SIZE_MB * 1024 * 1024;
+/** PSD 解析 worker 超时（毫秒） */
+export const psdParseTimeoutMs = env.PSD_PARSE_TIMEOUT_MS;
+/** PSD 解析并发上限（psd-parser 信号量用） */
+export const psdParseConcurrency = env.PSD_PARSE_CONCURRENCY;
+/** PSD 上传预签名 URL 有效期（秒） */
+export const psdUploadUrlExpiresSec = env.PSD_UPLOAD_URL_EXPIRES_SEC;
 
 /**
  * Admin IP 白名单解析（CIDR 或单 IP，逗号分隔）

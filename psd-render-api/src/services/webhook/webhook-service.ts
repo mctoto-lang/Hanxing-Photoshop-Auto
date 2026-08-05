@@ -221,6 +221,33 @@ class WebhookService {
    */
   private inFlight = new Set<string>();
 
+  async enqueueOutbox(tx: any, input: EnqueueInput): Promise<void> {
+    const eventId = `${input.jobId}.${input.event}`;
+    const payload = JSON.stringify({
+      eventId,
+      event: input.event,
+      jobId: input.jobId,
+      timestamp: new Date().toISOString(),
+      ...(input.payload ?? {}),
+    });
+    await tx.webhookLog.create({
+      data: {
+        eventId,
+        jobId: input.jobId,
+        event: input.event,
+        targetUrl: input.targetUrl,
+        apiKeyId: input.apiKeyId ?? null,
+        payload,
+        status: 'RETRYING',
+        nextAttemptAt: new Date(),
+        attempt: 0,
+        maxAttempts: DEFAULT_MAX_ATTEMPTS,
+      },
+    }).catch((error: any) => {
+      if (error?.code !== 'P2002') throw error;
+    });
+  }
+
   /**
    * 入队 webhook 投递任务
    *
@@ -279,7 +306,8 @@ class WebhookService {
           targetUrl: input.targetUrl,
           apiKeyId: input.apiKeyId ?? null,
           payload: fullPayload,
-          status: 'PENDING',
+          status: 'RETRYING',
+          nextAttemptAt: new Date(),
           attempt: 0,
           maxAttempts: DEFAULT_MAX_ATTEMPTS,
         },

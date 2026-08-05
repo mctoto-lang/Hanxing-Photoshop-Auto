@@ -117,7 +117,9 @@ export type ErrorCode =
   | 'IP_NOT_ALLOWED'
   | 'RATE_LIMITED'
   // 第三期 M3+：配置错误（密文解密失败等）
-  | 'CONFIG_ERROR';
+  | 'CONFIG_ERROR'
+  | 'LEASE_LOST'
+  | 'COMPLETE_REPORT_FAILED';
 
 export const ERROR_HTTP_STATUS: Record<ErrorCode, number> = {
   INVALID_LAYER_BINDING: 422,
@@ -144,6 +146,8 @@ export const ERROR_HTTP_STATUS: Record<ErrorCode, number> = {
   IP_NOT_ALLOWED: 403,
   RATE_LIMITED: 429,
   CONFIG_ERROR: 500,
+  LEASE_LOST: 409,
+  COMPLETE_REPORT_FAILED: 500,
 };
 
 // ===== Admin 角色（第三期 M3） =====
@@ -227,9 +231,11 @@ export interface JobManifest {
    */
   layerSizes: Array<{
     layerId: number;
+    layerPath: string;
     width: number;
     height: number;
   }>;
+  jsxTimeoutSeconds: number;
   /** 结果文件上传地址（Worker 直接 PUT 文件到此 URL） */
   resultUploadUrl: string;
   /** 结果文件应使用的 objectKey（complete 时回传） */

@@ -18,6 +18,11 @@ import path from 'node:path';
 import os from 'node:os';
 import { createRequire } from 'node:module';
 import sharp from 'sharp';
+// 修复缩略图：用 ag-psd 读取 PSD 内嵌 JPEG 缩略图资源 (Resource 1036)
+//   原 psd 包读 Image Data Section（合并合成图），但部分 PSD 该区域不完整/过时，
+//   导致缩略图仅显示残缺内容（如倾斜长方形 + 大面积透明）。
+//   ag-psd + Resource 1036 始终由 Photoshop 正确生成，代表完整画布预览。
+import { initializeCanvas, readPsd } from 'ag-psd';
 // P2-F：从 env.ts 读取 zod 校验后的环境变量，避免 Number(process.env.X) 在误配为
 //   非数字字符串时返回 NaN 导致大小保护失效（size > NaN 恒为 false）。
 //   env.ts 在主线程启动时已 fail-fast 校验，worker_threads 共享同一 process.env，
@@ -128,6 +133,37 @@ async function getPsd(): Promise<PsdClass> {
     patchPsdForSmartObjectDetection();
   }
   return _psd;
+}
+
+/**
+ * ag-psd 在 Node.js 中需要 Canvas 实现才能解码 ImageData。
+ * 这里提供最小 shim：只支持 createImageData / putImageData / getImageData，
+ * 不做真实渲染——putImageData 缓存像素数据，getImageData 取回，足够读取
+ * PSD 内嵌缩略图资源 (Resource 1036) 的像素数据。
+ */
+let _agPsdInitialized = false;
+function initAgPsdCanvas(): void {
+  if (_agPsdInitialized) return;
+  _agPsdInitialized = true;
+  // Node.js 无 DOM，ag-psd 的 initializeCanvas 期望返回 HTMLCanvasElement。
+  // 这里提供最小 shim（只实现 createImageData/putImageData/getImageData），
+  // 用 any 绕过类型检查——足够读取 PSD 内嵌缩略图的像素数据。
+  initializeCanvas(((width: number, height: number) => {
+    let stored: { data: Uint8ClampedArray; width: number; height: number } | null = null;
+    const ctx = {
+      createImageData: (w: number, h: number) => ({
+        data: new Uint8ClampedArray(w * h * 4),
+        width: w,
+        height: h,
+        colorSpace: 'srgb' as const,
+      }),
+      putImageData: (imgData: { data: Uint8ClampedArray; width: number; height: number }) => {
+        stored = imgData;
+      },
+      getImageData: () => stored,
+    };
+    return { width, height, getContext: () => ctx };
+  }) as any);
 }
 
 // ============== 解析逻辑（从 psd-parser.ts 移植） ==============
@@ -347,6 +383,17 @@ async function handleParse(filePath: string, templateId: string, templateVersion
 
 async function handleThumbnail(filePath: string, maxWidth: number): Promise<Buffer | null> {
   await assertFileSize(filePath);
+  const buf = await fs.readFile(filePath);
+
+  // 优先方案：用 ag-psd 同时读取合成图与 Resource 1036
+  //   1) 先试合成图（Image Data Section）— 分辨率高（如 1000×1000），缩放到 maxWidth 是下采样，画质好
+  //   2) 合成图残缺时（覆盖率 < 50%，部分 PSD 的合成图不完整/过时）回退到 Resource 1036
+  //      — Photoshop 保存时生成，始终代表完整画布的正确预览，但分辨率较低（通常 160×160），需放大
+  const agPsdThumb = await generateThumbnailWithAgPsd(buf, maxWidth);
+  if (agPsdThumb) return agPsdThumb;
+
+  // 最终回退：用 psd 包读 Image Data Section（合成图）
+  //   仅当 ag-psd 完全失败时使用（如非 Photoshop 保存的 PSD 无 Resource 1036）
   const PSD = await getPsd();
   const psd = PSD.fromFile(filePath);
   psd.parse();
@@ -361,13 +408,89 @@ async function handleThumbnail(filePath: string, maxWidth: number): Promise<Buff
     const rawBuf = await fs.readFile(rawPng);
     if (rawBuf.length === 0) return null;
     const thumb = await sharp(rawBuf)
-      .resize({ width: maxWidth, height: Math.round(maxWidth * 0.75), fit: 'inside', withoutEnlargement: true })
+      .resize({ width: maxWidth, height: maxWidth, fit: 'inside' })
+      .flatten({ background: '#ffffff' })
       .png({ quality: 80 })
       .toBuffer();
     return thumb;
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+/**
+ * 用 ag-psd 读取 PSD 并生成正方形缩略图。
+ *
+ * 策略（按画质从高到低）：
+ *   1. 合成图（Image Data Section）— 原始分辨率，下采样画质最佳
+ *      但部分 PSD 的合成图不完整/过时（覆盖率 < 50%），需跳过
+ *   2. Resource 1036（JPEG 缩略图）— Photoshop 保存时生成，始终正确
+ *      但分辨率较低（通常 160×160），放大到 maxWidth 会有轻微模糊
+ *
+ * @returns PNG Buffer；若两条路径都失败返回 null
+ */
+async function generateThumbnailWithAgPsd(psdBuffer: Buffer, maxWidth: number): Promise<Buffer | null> {
+  try {
+    initAgPsdCanvas();
+    const psd = readPsd(psdBuffer, {
+      skipCompositeImageData: false, // 读取合成图（高分辨率）
+      skipLayerImageData: true,
+    });
+
+    // 方案1：合成图（psd.canvas）— 检查覆盖率，仅当合成图完整时使用
+    const compositeCanvas = (psd as any).canvas;
+    if (compositeCanvas) {
+      const ctx = compositeCanvas.getContext('2d');
+      const imgData = ctx?.getImageData?.();
+      if (imgData && imgData.data && imgData.data.length > 0) {
+        const coverage = computeOpaqueCoverage(imgData.data);
+        // 覆盖率 > 50% 认为合成图完整；低于此值可能是残缺的（如仅剩一条像素带）
+        if (coverage > 0.5) {
+          return await resizeToSquareThumbnail(imgData, maxWidth);
+        }
+      }
+    }
+
+    // 方案2：Resource 1036（imageResources.thumbnail）— 始终正确，允许放大
+    const thumb = (psd as any).imageResources?.thumbnail;
+    if (thumb && thumb.width && thumb.height) {
+      const ctx = thumb.getContext('2d');
+      const imgData = ctx?.getImageData?.();
+      if (imgData && imgData.data && imgData.data.length > 0) {
+        return await resizeToSquareThumbnail(imgData, maxWidth);
+      }
+    }
+
+    return null;
+  } catch {
+    // ag-psd 解析失败时回退到旧方案
+    return null;
+  }
+}
+
+/** 计算 RGBA 像素数据中不透明像素的占比（alpha >= 10 视为不透明） */
+function computeOpaqueCoverage(data: Uint8ClampedArray): number {
+  let opaque = 0;
+  const total = data.length / 4;
+  for (let i = 3; i < data.length; i += 4) {
+    if (data[i] >= 10) opaque++;
+  }
+  return total > 0 ? opaque / total : 0;
+}
+
+/** 将 RGBA ImageData 缩放为正方形 PNG（压白底），允许放大以支持低分辨率来源 */
+async function resizeToSquareThumbnail(
+  imgData: { data: Uint8ClampedArray; width: number; height: number },
+  maxWidth: number,
+): Promise<Buffer> {
+  const rawBuf = Buffer.from(imgData.data);
+  return sharp(rawBuf, {
+    raw: { width: imgData.width, height: imgData.height, channels: 4 },
+  })
+    .resize({ width: maxWidth, height: maxWidth, fit: 'inside' }) // 正方形，匹配 PSD 画布比例；不设 withoutEnlargement 允许低分辨率来源放大
+    .flatten({ background: '#ffffff' }) // 压白底，避免透明区域在深色 UI 上显示为棋盘格
+    .png()
+    .toBuffer();
 }
 
 async function main() {
@@ -380,7 +503,7 @@ async function main() {
         const result = await handleParse(req.filePath, req.templateId!, req.templateVersionId!);
         port.postMessage({ ok: true, result });
       } else if (req.type === 'thumbnail') {
-        const buf = await handleThumbnail(req.filePath, req.maxWidth ?? 640);
+        const buf = await handleThumbnail(req.filePath, req.maxWidth ?? 800);
         port.postMessage({ ok: true, thumbnail: buf ? Buffer.from(buf) : null });
       } else {
         port.postMessage({ ok: false, error: `未知请求类型: ${req.type}` });
