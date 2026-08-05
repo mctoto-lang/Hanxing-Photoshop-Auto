@@ -18,8 +18,8 @@
 #   - 生产环境必须修改 ADMIN_BOOTSTRAP_PASSWORD 和 API_KEY
 
 # Compose 项目名称：决定容器/网络/数据卷的资源前缀
-# 注：Docker 资源名强制小写，compose 会将大写自动规范化为 hanxing-photoshop-auto
-name: Hanxing-Photoshop-Auto
+# 注：Compose Spec 要求 name 符合 ^[a-z0-9][a-z0-9_-]*$，必须全小写
+name: hanxing-photoshop-auto
 
 services:
   # ===== PSD 渲染后端 API（单容器，含 SQLite + 内存队列） =====
