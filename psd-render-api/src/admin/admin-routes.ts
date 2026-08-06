@@ -21,6 +21,7 @@ import { alertService } from '../services/alert/alert-service.js';
 import { getTemplateDisplayStatus } from '../services/template/template-status.js';
 import { adminAuthService } from '../services/admin/admin-auth-service.js';
 import { env } from '../config/env.js';
+import { getStorage } from '../services/storage/index.js';
 
 function extractToken(req: any): string | null {
   const cookie = req.headers.cookie;
@@ -138,22 +139,27 @@ export async function adminRoutes(app: FastifyInstance) {
               type: 'array',
               items: {
                 type: 'object',
-                required: ['jobId', 'status', 'priority', 'attempt', 'stage', 'progress', 'errorCode', 'template', 'worker', 'workerCustomCode', 'workerDisplayName', 'createdAt', 'succeededAt', 'failedAt'],
+                required: ['jobId', 'status', 'priority', 'attempt', 'maxAttempts', 'stage', 'progress', 'errorCode', 'template', 'worker', 'workerCustomCode', 'workerDisplayName', 'resultAvailable', 'resultMimeType', 'resultSizeBytes', 'resultExpiresAt', 'createdAt', 'succeededAt', 'failedAt'],
                 properties: {
                   jobId: { type: 'string' },
                   status: { type: 'string' },
                   priority: { type: 'integer' },
                   attempt: { type: 'integer' },
-                  stage: { type: 'string' },
+                  maxAttempts: { type: 'integer' },
+                  stage: { type: 'string', nullable: true },
                   progress: { type: 'integer' },
                   errorCode: { type: 'string', nullable: true },
                   // 修复：handler 实际返回 j.templateVersion.template.name（字符串），
                   //   原 schema 声明为 type:'object' 导致 fast-json-stringify 按字符索引
                   //   把字符串序列化为 {"0":"挂","1":"历",...} 对象，前端 escapeHtml 后显示 [object Object]
                   template: { type: 'string' },
-                  worker: { type: 'object', nullable: true },
+                  worker: { type: 'string', nullable: true },
                   workerCustomCode: { type: 'string', nullable: true },
                   workerDisplayName: { type: 'string', nullable: true },
+                  resultAvailable: { type: 'boolean' },
+                  resultMimeType: { type: 'string', nullable: true },
+                  resultSizeBytes: { type: 'integer', nullable: true },
+                  resultExpiresAt: { type: 'string', format: 'date-time', nullable: true },
                   createdAt: { type: 'string', format: 'date-time' },
                   succeededAt: { type: 'string', format: 'date-time', nullable: true },
                   failedAt: { type: 'string', format: 'date-time', nullable: true },
@@ -173,27 +179,84 @@ export async function adminRoutes(app: FastifyInstance) {
       include: {
         templateVersion: { include: { template: true } },
         worker: true,
+        artifacts: { where: { kind: 'output' }, orderBy: { createdAt: 'desc' }, take: 1 },
       },
     });
     return reply.send({
-      jobs: jobs.map((j) => ({
-        jobId: j.code,
-        status: j.status,
-        priority: j.priority,
-        attempt: j.attempt,
-        stage: j.stage,
-        progress: j.progress,
-        errorCode: j.errorCode,
-        template: j.templateVersion.template.name,
-        worker: j.worker?.code ?? null,
-        // 返回 Worker 自定义编号/名称，便于 Admin UI 显示业务可识别的节点标识
-        workerCustomCode: j.worker?.customCode ?? null,
-        workerDisplayName: j.worker?.displayName ?? null,
-        createdAt: j.createdAt,
-        succeededAt: j.succeededAt,
-        failedAt: j.failedAt,
-      })),
+      jobs: jobs.map((j) => {
+        const result = j.artifacts[0];
+        return {
+          jobId: j.code,
+          status: j.status,
+          priority: j.priority,
+          attempt: j.attempt,
+          maxAttempts: j.maxAttempts,
+          stage: j.stage,
+          progress: j.progress,
+          errorCode: j.errorCode,
+          template: j.templateVersion.template.name,
+          worker: j.worker?.code ?? null,
+          workerCustomCode: j.worker?.customCode ?? null,
+          workerDisplayName: j.worker?.displayName ?? null,
+          resultAvailable: Boolean(result && result.expiresAt.getTime() > Date.now()),
+          resultMimeType: result?.mimeType ?? null,
+          resultSizeBytes: result?.sizeBytes ?? null,
+          resultExpiresAt: result?.expiresAt ?? null,
+          createdAt: j.createdAt,
+          succeededAt: j.succeededAt,
+          failedAt: j.failedAt,
+        };
+      }),
     });
+  });
+
+  app.get('/api/jobs/:code/result', {
+    preHandler: [app.requireAdminAuth],
+    schema: {
+      tags: ['admin-jobs'],
+      summary: '下载任务结果',
+      description: '流式下载未过期的任务结果文件。',
+      security: [{ adminSession: [] }],
+      params: {
+        type: 'object',
+        required: ['code'],
+        properties: { code: { type: 'string' } },
+      },
+      response: {
+        200: { type: 'string', format: 'binary' },
+        404: { $ref: 'ErrorResponse#' },
+        410: { $ref: 'ErrorResponse#' },
+      },
+    },
+  }, async (req, reply) => {
+    const code = (req.params as { code: string }).code;
+    const job = await prisma.renderJob.findUnique({
+      where: { code },
+      include: { artifacts: { where: { kind: 'output' }, orderBy: { createdAt: 'desc' }, take: 1 } },
+    });
+    const result = job?.artifacts[0];
+    if (!result) {
+      return reply.code(404).send({ error: 'RESULT_NOT_FOUND', message: '任务结果不存在' });
+    }
+    if (result.expiresAt.getTime() <= Date.now()) {
+      return reply.code(410).send({ error: 'RESULT_EXPIRED', message: '任务结果已过期' });
+    }
+    const storage = await getStorage();
+    const meta = await storage.headObject(result.objectKey);
+    if (!meta) {
+      return reply.code(404).send({ error: 'RESULT_NOT_FOUND', message: '任务结果不存在' });
+    }
+    const extension = result.mimeType === 'image/png'
+      ? 'png'
+      : result.mimeType === 'image/jpeg'
+        ? 'jpg'
+        : result.mimeType === 'image/vnd.adobe.photoshop'
+          ? 'psd'
+          : 'bin';
+    reply.header('Content-Type', result.mimeType);
+    reply.header('Content-Length', meta.size);
+    reply.header('Content-Disposition', `attachment; filename="${code}.${extension}"`);
+    return storage.getObjectStream(result.objectKey);
   });
 
   // Worker 列表

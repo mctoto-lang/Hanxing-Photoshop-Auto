@@ -49,6 +49,10 @@ const licenseNoteSchema = z.object({
   licenseNote: z.string().max(500).nullable(),
 });
 
+const fontSettingsSchema = z.object({
+  fallbackFontVersionId: z.string().min(1).nullable(),
+});
+
 const batchCancelSchema = z.object({
   status: z.enum(['QUEUED', 'LEASED', 'PROCESSING', 'CANCELLING']).optional(),
 });
@@ -944,6 +948,57 @@ export async function adminWriteRoutes(app: FastifyInstance) {
       message: `禁用字体: ${id}`,
     });
     return reply.send(result);
+  });
+
+  app.get('/api/font-settings', {
+    preHandler: [app.requireAdminAuth],
+    schema: {
+      tags: ['admin-fonts'],
+      summary: '查看字体全局配置',
+      security: [{ adminSession: [] }],
+      response: {
+        200: { type: 'object', additionalProperties: true },
+      },
+    },
+  }, async (_req, reply) => reply.send(await fontService.getFallbackConfig()));
+
+  app.put('/api/font-settings', {
+    preHandler: [app.requireAdminAuth, app.requireRole('operator')],
+    schema: {
+      tags: ['admin-fonts'],
+      summary: '更新字体全局配置',
+      security: [{ adminSession: [] }],
+      body: {
+        type: 'object',
+        required: ['fallbackFontVersionId'],
+        properties: {
+          fallbackFontVersionId: { type: 'string', nullable: true },
+        },
+      },
+      response: {
+        200: { type: 'object', additionalProperties: true },
+        400: { $ref: 'ErrorResponse#' },
+        404: { $ref: 'ErrorResponse#' },
+      },
+    },
+  }, async (req, reply) => {
+    const parsed = fontSettingsSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'VALIDATION_ERROR', message: '字体全局配置参数无效' });
+    }
+    try {
+      const result = await fontService.setFallbackFont(parsed.data.fallbackFontVersionId);
+      auditService.recordFromReq(req, {
+        action: 'font_fallback_update',
+        refType: 'font',
+        refId: parsed.data.fallbackFontVersionId ?? 'none',
+        message: `更新全局兜底字体: ${parsed.data.fallbackFontVersionId ?? '未设置'}`,
+      });
+      return reply.send(result);
+    } catch (error: any) {
+      const status = error?.code === 'NOT_FOUND' ? 404 : 400;
+      return reply.code(status).send({ error: error?.code ?? 'VALIDATION_ERROR', message: error.message });
+    }
   });
 
   // 编辑许可证备注

@@ -19,26 +19,26 @@ export async function fontInternalRoutes(app: FastifyInstance) {
       response: {
         200: {
           type: 'object',
-          required: ['fonts'],
+          required: ['fonts', 'inventoryHash', 'count'],
           properties: {
             fonts: {
               type: 'array',
               description: '已发布字体清单',
               items: {
                 type: 'object',
+                required: ['postscriptName', 'familyName', 'style', 'sha256', 'fileUrl', 'fileToken'],
                 properties: {
-                  id: { type: 'string' },
-                  code: { type: 'string' },
                   postscriptName: { type: 'string' },
                   familyName: { type: 'string' },
                   style: { type: 'string' },
                   sha256: { type: 'string' },
-                  downloadUrl: { type: 'string' },
-                  sizeBytes: { type: 'integer' },
-                  status: { type: 'string', description: 'PUBLISHED | UNPUBLISHED' },
+                  fileUrl: { type: 'string' },
+                  fileToken: { type: 'string' },
                 },
               },
             },
+            inventoryHash: { type: 'string' },
+            count: { type: 'integer' },
           },
         },
         401: { $ref: 'ErrorResponse#', description: 'Worker 令牌无效' },

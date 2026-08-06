@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { buildNode } from './psd-worker.js';
 
 const workerSrc = readFileSync(
   fileURLToPath(new URL('./psd-worker.ts', import.meta.url)),
@@ -35,4 +36,21 @@ test('缩略图默认尺寸为 800×800 正方形，匹配 PSD 画布比例', ()
   // 原 640×480（4:3）不匹配方形画布；改为 800×800 正方形
   assert.match(workerSrc, /maxWidth \?\? 800/);
   assert.match(workerSrc, /resize\(\s*\{\s*width:\s*maxWidth,\s*height:\s*maxWidth,\s*fit:\s*'inside'/);
+});
+
+test('从 PSD 文字层导出数据识别类型并提取 sourceFontNames', () => {
+  const node = buildNode({
+    name: () => '标题',
+    layer: { id: 12 },
+    export: () => ({
+      text: {
+        value: '新品上市',
+        font: { names: ['SourceHanSansCN-Bold', ' SourceHanSansCN-Bold ', '', 'ArialMT'] },
+      },
+    }),
+  }, '', new Map(), 0, { count: 1 });
+
+  assert.equal(node?.type, 'text');
+  assert.equal(node?.defaultText, '新品上市');
+  assert.deepEqual(node?.sourceFontNames, ['SourceHanSansCN-Bold', 'ArialMT']);
 });

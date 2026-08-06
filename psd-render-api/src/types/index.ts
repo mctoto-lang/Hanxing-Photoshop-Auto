@@ -21,6 +21,7 @@ export interface LayerNode {
   visible: boolean;
   /** 文本图层默认文本 */
   defaultText?: string;
+  sourceFontNames?: string[];
   /** 智能对象内部文档尺寸（用于替换前预处理图片到目标尺寸） */
   smartObjectSize?: { width: number; height: number };
   /** 子图层 */
@@ -195,6 +196,7 @@ export interface JobManifest {
   jobId: string;
   jobCode: string;
   templateVersionId: string;
+  fallbackFontVersionId?: string;
   psdObjectKey: string;
   psdSha256: string;
   /** PSD 下载地址（Worker 下载模板用） */

@@ -111,9 +111,17 @@ model FontVersion {
   licenseNote     String?
   published       Boolean  @default(true)
   createdAt       DateTime @default(now())
+  fontConfig      FontConfig?
 
   @@unique([postscriptName, style])
   @@index([familyName])
+}
+
+model FontConfig {
+  id                    Int          @id @default(1)
+  fallbackFontVersionId String?      @unique
+  fallbackFontVersion   FontVersion? @relation(fields: [fallbackFontVersionId], references: [id], onDelete: Restrict)
+  updatedAt             DateTime     @updatedAt
 }
 
 model Worker {

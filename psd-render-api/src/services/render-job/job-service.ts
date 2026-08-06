@@ -344,13 +344,18 @@ class RenderJobService {
     if (!job) throw Errors.workerNotFound('任务不存在');
 
     const layerSchemaRaw: LayerSchema = JSON.parse(job.templateVersion.layerSchema);
+    const fontConfig = await prisma.fontConfig.findUnique({ where: { id: 1 } });
+    const fallbackFontVersionId = fontConfig?.fallbackFontVersionId ?? undefined;
     // 过滤掉非 smartObject/text/pixel 的旧类型绑定（向后兼容旧数据，避免 JSX 报错）
     const layerSchema: LayerSchema = {
       ...layerSchemaRaw,
-      bindings: layerSchemaRaw.bindings.filter(
-        (b) => b.type === 'smartObject' || b.type === 'text' || b.type === 'pixel',
-      ),
+      bindings: layerSchemaRaw.bindings
+        .filter((b) => b.type === 'smartObject' || b.type === 'text' || b.type === 'pixel'),
     };
+    const referencedFontIds = [...new Set(layerSchema.bindings
+      .map((b) => b.defaultFontVersionId)
+      .concat(fallbackFontVersionId)
+      .filter((id): id is string => Boolean(id)))];
     const input: RenderJobInput = JSON.parse(job.inputJson);
     const output: RenderJobOutput = {
       format: job.outputFormat as 'png' | 'jpeg' | 'psd',
@@ -388,7 +393,9 @@ class RenderJobService {
         expiresInSec: urlTtl,
       }),
       (async () => {
-        const fonts = await prisma.fontVersion.findMany({ where: { published: true } });
+        const fonts = await prisma.fontVersion.findMany({
+          where: { id: { in: referencedFontIds }, published: true },
+        });
         return Promise.all(
           fonts.map(async (f) => {
             const dl = await storage.generateDownloadUrl({
@@ -452,6 +459,7 @@ class RenderJobService {
       jobId: job.id,
       jobCode: job.code,
       templateVersionId: job.templateVersionId,
+      fallbackFontVersionId,
       psdObjectKey: job.templateVersion.psdObjectKey,
       psdSha256: job.templateVersion.psdSha256,
       psdDownloadUrl: psdDl.downloadUrl,

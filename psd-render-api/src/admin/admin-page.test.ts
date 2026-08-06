@@ -62,3 +62,21 @@ test('最近任务列表 template 字段 schema 为 string，避免 [object Obje
   assert.match(jobsRoute, /template:\s*\{\s*type:\s*'string'/);
   assert.doesNotMatch(jobsRoute, /template:\s*\{\s*type:\s*'object'/);
 });
+
+test('字体管理支持选择已发布字体作为全局兜底字体', () => {
+  assert.match(adminPageHtml, /\/admin\/api\/font-settings/);
+  assert.match(adminPageHtml, /fallbackFontVersionId/);
+  assert.match(adminPageHtml, /全局兜底字体/);
+});
+
+test('最近成功任务为有效结果显示下载按钮', () => {
+  const loadJobs = adminPageHtml.match(/async function loadJobs\(\) \{[\s\S]*?\n    \}/)?.[0] ?? '';
+  assert.match(loadJobs, /resultAvailable/);
+  assert.match(loadJobs, /\/admin\/api\/jobs\//);
+  assert.match(loadJobs, /下载结果/);
+});
+
+test('文字图层展示 PSD 源字体名称', () => {
+  assert.match(adminPageHtml, /sourceFontNames/);
+  assert.match(adminPageHtml, /PSD 字体/);
+});

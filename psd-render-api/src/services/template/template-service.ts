@@ -205,6 +205,21 @@ class TemplateService {
         },
       });
 
+      // 模板版本已持久化持有 psdObjectKey，COS 对象所有权从 template_upload artifact
+      // 转移到 templateVersion。删除该 artifact 记录，避免产物清理器（startArtifactReaper）
+      // 在 psdUploadUrlExpiresSec（默认 20 分钟）后误删该 COS 对象 —— 否则模板仍引用已删
+      // 的 key，后续提交任务 worker 下载 PSD 会 404。
+      // templateVersion.psdObjectKey 是 COS 对象的权威引用：模板软删除/孤儿清理器仍会清理它。
+      // 失败仅告警不阻断解析成功路径（避免因 artifact 删除失败回滚已成立的模板）。
+      await prisma.artifact.delete({ where: { id: upload.id } }).catch((e) => {
+        logger.warn({
+          err: e as Error,
+          artifactId: upload.id,
+          objectKey: opts.objectKey,
+          msg: '删除 template_upload artifact 失败，COS 对象可能被产物清理器误删，请人工核查',
+        });
+      });
+
       logger.info({
         templateId: template.id,
         versionId: version.id,

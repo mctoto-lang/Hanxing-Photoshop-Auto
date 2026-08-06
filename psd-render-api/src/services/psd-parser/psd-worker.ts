@@ -188,6 +188,7 @@ interface LayerNode {
   visible: boolean;
   bounds?: { top: number; left: number; bottom: number; right: number };
   defaultText?: string;
+  sourceFontNames?: string[];
   smartObjectSize?: { width: number; height: number };
   children?: LayerNode[];
 }
@@ -222,7 +223,7 @@ function extractChildren(
   return nodes;
 }
 
-function buildNode(
+export function buildNode(
   node: any,
   parentPath: string,
   nameCounter: Map<string, number>,
@@ -232,6 +233,7 @@ function buildNode(
   if (!node) return null;
   const name: string = typeof node.name === 'function' ? node.name() : (node.name ?? '未命名');
   const rawLayer = node.layer ?? node;
+  const exported = extractExportedNode(node);
 
   let layerId = 0;
   try {
@@ -249,7 +251,7 @@ function buildNode(
 
   const pathSegment = buildPathSegment(name, parentPath, nameCounter);
   const layerPath = parentPath ? `${parentPath}/${pathSegment}` : pathSegment;
-  const type = detectType(node, rawLayer);
+  const type = detectType(node, rawLayer, exported);
   const visible = isVisible(node, rawLayer);
   const bounds = extractBounds(node, rawLayer);
 
@@ -257,8 +259,10 @@ function buildNode(
   if (bounds) result.bounds = bounds;
 
   if (type === 'text') {
-    const defaultText = extractText(node, rawLayer);
+    const defaultText = extractText(rawLayer, exported);
     if (defaultText !== undefined) result.defaultText = defaultText;
+    const sourceFontNames = extractSourceFontNames(exported);
+    if (sourceFontNames.length > 0) result.sourceFontNames = sourceFontNames;
   }
 
   if (type === 'smartObject') {
@@ -283,9 +287,10 @@ function buildPathSegment(name: string, parentPath: string, nameCounter: Map<str
   return `${name}[${count}]`;
 }
 
-function detectType(node: any, rawLayer: any): string {
+function detectType(node: any, rawLayer: any, exported: any): string {
   if (typeof node.isText === 'function' && node.isText()) return 'text';
   if (rawLayer?.text !== undefined && rawLayer?.text !== null) return 'text';
+  if (exported?.text?.value !== undefined) return 'text';
   if (rawLayer?.placedLayer !== undefined && rawLayer?.placedLayer !== null) return 'smartObject';
   if (rawLayer?.smartObject !== undefined && rawLayer?.smartObject !== null) return 'smartObject';
   if (Array.isArray(rawLayer?.infoKeys)) {
@@ -321,16 +326,24 @@ function extractBounds(node: any, rawLayer: any): { top: number; left: number; b
   return undefined;
 }
 
-function extractText(node: any, rawLayer: any): string | undefined {
+function extractExportedNode(node: any): any {
   try {
-    if (rawLayer?.text?.value) return rawLayer.text.value;
-    if (typeof node.export === 'function') {
-      const exported = node.export({ text: true });
-      if (typeof exported?.value === 'string') return exported.value;
-      if (typeof exported?.text?.value === 'string') return exported.text.value;
-    }
+    if (typeof node.export === 'function') return node.export({ text: true });
   } catch { /* ignore */ }
   return undefined;
+}
+
+function extractText(rawLayer: any, exported: any): string | undefined {
+  if (typeof rawLayer?.text?.value === 'string') return rawLayer.text.value;
+  if (typeof exported?.value === 'string') return exported.value;
+  if (typeof exported?.text?.value === 'string') return exported.text.value;
+  return undefined;
+}
+
+function extractSourceFontNames(exported: any): string[] {
+  const names = exported?.text?.font?.names;
+  if (!Array.isArray(names)) return [];
+  return [...new Set(names.filter((name): name is string => typeof name === 'string').map((name) => name.trim()).filter(Boolean))];
 }
 
 function extractSmartObjectSize(node: any, rawLayer: any): { width: number; height: number } | undefined {
@@ -514,5 +527,5 @@ async function main() {
   });
 }
 
-void main();
+if (parentPort) void main();
 void workerData;

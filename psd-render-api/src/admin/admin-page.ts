@@ -192,6 +192,7 @@ export const adminPageHtml = `<!DOCTYPE html>
   <div class="scroll-table"><table id="templates"><tr><td class="empty">加载中...</td></tr></table></div>
 
   <h2>字体 <button class="btn-act" style="float:right;margin-top:4px" onclick="openFontUpload()">上传字体</button></h2>
+  <div class="stat" id="fontSettings"><div class="empty">加载中...</div></div>
   <div class="scroll-table"><table id="fonts"><tr><td class="empty">加载中...</td></tr></table></div>
 
   <h2>API Key <span style="font-size:11px;color:#8b95a7;font-weight:normal;">（调用方密钥）</span> <button class="btn-act" style="float:right;margin-top:4px" onclick="apiKeyCreate()">+ 新建 API Key</button></h2>
@@ -615,6 +616,8 @@ export const adminPageHtml = `<!DOCTYPE html>
             if (isLeased) ops += '<button class="btn-act warn" onclick="jobReleaseLease(\\'' + j.jobId + '\\')">释放租约</button>';
           } else if (isFailed) {
             ops = '<button class="btn-act" onclick="jobRetry(\\'' + j.jobId + '\\')">重试</button>';
+          } else if (j.resultAvailable) {
+            ops = '<a class="btn-act" href="/admin/api/jobs/' + encodeURIComponent(j.jobId) + '/result">下载结果</a>';
           }
           // Worker 显示：优先自定义编号，回落到系统编号；鼠标悬停显示节点名称
           const workerCode = j.workerCustomCode || j.worker;
@@ -747,6 +750,7 @@ export const adminPageHtml = `<!DOCTYPE html>
 
     async function loadFonts() {
       const { fonts } = await fetchJSON('/admin/api/fonts');
+      await loadFontSettings(fonts || []);
       if (!fonts || !fonts.length) { document.getElementById('fonts').innerHTML = '<tr><td class="empty">暂无字体</td></tr>'; return; }
       document.getElementById('fonts').innerHTML = \`
         <thead><tr><th>字体族</th><th>PostScript 名</th><th>样式</th><th>状态</th><th>许可证</th><th>SHA256</th><th>操作</th></tr></thead>
@@ -768,6 +772,27 @@ export const adminPageHtml = `<!DOCTYPE html>
           </tr>\`;
         }).join('')}
         </tbody>\`;
+    }
+
+    async function loadFontSettings(fonts) {
+      const container = document.getElementById('fontSettings');
+      const config = await fetchJSON('/admin/api/font-settings');
+      const published = fonts.filter(f => f.published);
+      container.innerHTML = '<div class="form-row"><label>全局兜底字体</label><select id="fallbackFontVersionId"><option value="">不设置</option>'
+        + published.map(f => '<option value="' + escapeHtml(f.fontId) + '">' + escapeHtml(f.familyName + ' / ' + f.postscriptName) + '</option>').join('')
+        + '</select><div class="form-hint">指定字体或 PSD 原字体不可用时使用，字体缺失不会中断任务</div></div>'
+        + '<button class="btn-primary" onclick="saveFontSettings()">保存兜底字体</button><span class="form-hint" id="fontSettingsStatus"></span>';
+      document.getElementById('fallbackFontVersionId').value = config.fallbackFontVersionId || '';
+    }
+
+    async function saveFontSettings() {
+      const value = document.getElementById('fallbackFontVersionId').value || null;
+      const status = document.getElementById('fontSettingsStatus');
+      status.textContent = '保存中...';
+      try {
+        await fetchJSON('/admin/api/font-settings', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ fallbackFontVersionId: value }) });
+        status.textContent = '已保存';
+      } catch (e) { status.textContent = '保存失败: ' + e.message; }
     }
 
     function escapeHtml(s) {
@@ -1482,6 +1507,7 @@ export const adminPageHtml = `<!DOCTYPE html>
           '<div class="layer-node ' + (isSelected ? 'selected' : '') + '" data-layer-path="' + escapeHtml(n.layerPath) + '" onclick="selectLayer(this.dataset.layerPath)">' +
             '<span class="name">' + escapeHtml(n.name) + '</span>' +
             '<span class="type">' + n.type + '</span>' +
+            (n.type === 'text' && n.sourceFontNames && n.sourceFontNames.length ? '<span class="type" title="PSD 字体">' + escapeHtml(n.sourceFontNames.join(', ')) + '</span>' : '') +
             (isBound ? '<span class="bound">●已绑定</span>' : '') +
           '</div>' +
           childHtml +
@@ -1523,6 +1549,7 @@ export const adminPageHtml = `<!DOCTYPE html>
         +   'layerPath: <code>' + escapeHtml(layer.layerPath) + '</code>'
         + (layer.bounds ? ' · 尺寸: ' + (layer.bounds.right - layer.bounds.left) + '×' + (layer.bounds.bottom - layer.bounds.top) : '')
         + (layer.smartObjectSize ? ' · 内部尺寸: ' + layer.smartObjectSize.width + '×' + layer.smartObjectSize.height : '')
+        + (layer.sourceFontNames && layer.sourceFontNames.length ? ' · PSD 字体: ' + escapeHtml(layer.sourceFontNames.join(', ')) : '')
         + '</div>'
         + (canBind ? ''
           + '<div class="form-row">'

@@ -251,6 +251,38 @@ class FontService {
     }));
   }
 
+  async getFallbackConfig() {
+    const config = await prisma.fontConfig.findUnique({
+      where: { id: 1 },
+      include: { fallbackFontVersion: true },
+    });
+    const font = config?.fallbackFontVersion ?? null;
+    return {
+      fallbackFontVersionId: font?.id ?? null,
+      fallbackFont: font ? {
+        fontId: font.id,
+        familyName: font.familyName,
+        postscriptName: font.postscriptName,
+        style: font.style,
+        published: font.published,
+      } : null,
+    };
+  }
+
+  async setFallbackFont(fallbackFontVersionId: string | null) {
+    if (fallbackFontVersionId) {
+      const font = await prisma.fontVersion.findUnique({ where: { id: fallbackFontVersionId } });
+      if (!font) throw Errors.notFound('字体不存在');
+      if (!font.published) throw Errors.validationError('全局兜底字体必须是已发布字体');
+    }
+    await prisma.fontConfig.upsert({
+      where: { id: 1 },
+      create: { id: 1, fallbackFontVersionId },
+      update: { fallbackFontVersionId },
+    });
+    return this.getFallbackConfig();
+  }
+
   // ============== 第三期 M4：Admin 写操作 ==============
 
   /** 启用/禁用字体（影响 Worker 字体清单同步） */
@@ -264,6 +296,20 @@ class FontService {
       throw Errors.validationError(
         `字体 ${font.postscriptName} 未设置许可证备注（licenseNote），无法启用。请先编辑许可证信息。`,
       );
+    }
+    if (!published) {
+      const [refCount, config] = await Promise.all([
+        prisma.layerBinding.count({ where: { defaultFontVersionId: fontVersionId } }),
+        prisma.fontConfig.findFirst({ where: { fallbackFontVersionId: fontVersionId } }),
+      ]);
+      if (refCount > 0) {
+        throw Errors.validationError(
+          `字体 ${font.postscriptName} 被 ${refCount} 个图层绑定引用，请先解除引用后再禁用`,
+        );
+      }
+      if (config) {
+        throw Errors.validationError(`字体 ${font.postscriptName} 是全局兜底字体，请先取消全局兜底配置后再禁用`);
+      }
     }
     await prisma.fontVersion.update({
       where: { id: fontVersionId },
@@ -345,6 +391,14 @@ class FontService {
     if (refCount > 0) {
       throw Errors.validationError(
         `字体 ${font.postscriptName} 被 ${refCount} 个图层绑定引用，请先在模板绑定编辑器中解除引用后再删除`,
+      );
+    }
+    const fallbackRef = await prisma.fontConfig.findFirst({
+      where: { fallbackFontVersionId: fontVersionId },
+    });
+    if (fallbackRef) {
+      throw Errors.validationError(
+        `字体 ${font.postscriptName} 是全局兜底字体，请先取消全局兜底配置后再删除`,
       );
     }
 
