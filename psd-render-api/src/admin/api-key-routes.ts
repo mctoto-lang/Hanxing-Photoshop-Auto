@@ -6,14 +6,14 @@
  *   - GET    /admin/api/api-keys/:id            详情（viewer+）
  *   - POST   /admin/api/api-keys                创建（operator+，明文 key 仅返回一次）
  *   - PUT    /admin/api/api-keys/:id            更新配置（operator+）
- *   - POST   /admin/api/api-keys/:id/rotate     轮换（operator+，新明文 key 仅返回一次）
+ *   - GET    /admin/api/api-keys/:id/plaintext  查看明文（operator+，可反复查看）
  *   - POST   /admin/api/api-keys/:id/disable    禁用（operator+）
  *   - POST   /admin/api/api-keys/:id/enable     启用（operator+）
  *   - POST   /admin/api/api-keys/:id/reset-quota  重置日配额（operator+）
  *   - DELETE /admin/api/api-keys/:id            彻底删除（admin）
  *
  * 安全：
- *   - 创建/轮换返回的 plaintextKey 仅此一次，前端必须立即提示用户保存
+ *   - 创建返回的 plaintextKey 仅此一次；后续可随时经 /plaintext 查看（解密副本）
  *   - 列表/详情响应中不含 keyHash
  */
 import { FastifyInstance } from 'fastify';
@@ -304,13 +304,13 @@ export async function apiKeyRoutes(app: FastifyInstance) {
     }
   });
 
-  // 轮换
-  app.post('/api/api-keys/:id/rotate', {
+  // 查看明文（替代已移除的轮换）
+  app.get('/api/api-keys/:id/plaintext', {
     preHandler: [app.requireAdminAuth, app.requireRole('operator')],
     schema: {
       tags: ['admin-api-keys'],
-      summary: '轮换 API Key',
-      description: '生成新的明文 key 并替换 keyHash，旧 key 立即失效。响应中的 `plaintextKey` 仅此一次返回。operator 及以上可调用。',
+      summary: '查看 API Key 明文',
+      description: '解密返回该密钥的完整明文（创建时保存的 AES-256-GCM 副本），可反复查看。存量旧密钥未保存副本，返回 400 提示删除重建。operator 及以上可调用。',
       security: [{ adminSession: [] }],
       params: {
         type: 'object',
@@ -320,10 +320,10 @@ export async function apiKeyRoutes(app: FastifyInstance) {
         200: {
           type: 'object',
           properties: {
-            apiKey: { type: 'object', additionalProperties: true },
-            plaintextKey: { type: 'string', description: '新明文 API Key（仅此一次返回）' },
+            plaintextKey: { type: 'string', description: '完整明文 API Key' },
           },
         },
+        400: { $ref: 'ErrorResponse#' },
         404: { $ref: 'ErrorResponse#' },
       },
     },
@@ -331,23 +331,22 @@ export async function apiKeyRoutes(app: FastifyInstance) {
     const id = (req.params as any).id as string;
     const operator = req.adminUser?.username ?? 'admin';
     try {
-      const result = await apiKeyService.rotate(id, operator);
+      const result = await apiKeyService.revealPlaintext(id, operator);
       auditService.recordFromReq(req, {
-        action: 'api_key_rotate',
+        action: 'api_key_reveal',
         refType: 'api_key',
         refId: id,
-        message: `轮换 API Key: ${result.apiKey.name}（新前缀 ${result.apiKey.keyPrefix}）`,
-        meta: { oldId: id, newId: result.apiKey.id, newKeyPrefix: result.apiKey.keyPrefix },
+        message: `查看 API Key 明文`,
       });
       return reply.send(result);
     } catch (e) {
       const err = toHttpError(e);
       auditService.recordFromReq(req, {
-        action: 'api_key_rotate',
+        action: 'api_key_reveal',
         result: 'failure',
         refType: 'api_key',
         refId: id,
-        message: `轮换 API Key 失败: ${err.message}`,
+        message: `查看 API Key 明文失败: ${err.message}`,
       });
       return reply.code(err.status).send({ error: err.code, message: err.message });
     }

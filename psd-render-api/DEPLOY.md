@@ -117,8 +117,9 @@ API_KEY=sk_live_<strong-random-string>
 #       一旦设定后不可随意修改（修改后已加密的 COS Secret 等配置将无法解密）
 WORKER_TOKEN_SECRET=<strong-random-string>
 
-# Worker 注册预共享密钥（生产强制非空）
-WORKER_REGISTER_SECRET=<strong-random-string>
+# Worker 注册密钥（推荐使用 Admin UI 一次性授权码模式，无需在此配置）
+# 此字段为兼容备选：授权码模式优先校验，仅作长期密钥备用
+# WORKER_REGISTER_SECRET=<strong-random-string>
 
 # Admin 引导密码（首次启动创建管理员账号，必须修改）
 ADMIN_BOOTSTRAP_PASSWORD=<strong-password>
@@ -253,20 +254,22 @@ docker compose restart api
 
 ### 3.2 安装步骤
 
-1. **安装 Photoshop 2024**：从 Adobe Creative Cloud 安装
-2. **预装字体**：将业务字体复制到 `C:\Windows\Fonts`
-3. **安装 Electron Worker**：双击 `PsdRenderWorker-Setup.exe`
+1. **安装 Photoshop 2024**：从 Adobe Creative Cloud 安装（Worker 最低要求 PS 2024 / v25，低于此版本会拒绝注册）
+2. **预装字体**：业务字体推荐走 Admin 后台「字体管理」上传并启用，Worker 空闲时自动同步安装；也可手动复制到 `C:\Windows\Fonts`
+3. **安装 Electron Worker**：双击 `PsdRenderWorker-{version}-x64.exe`（NSIS 安装包），或使用 `PsdRenderWorker-{version}-portable.exe` 便携版免安装
    - 安装路径：`%PROGRAMDATA%\PsdRenderWorker\`
    - 安装时会请求 UAC 管理员权限（用于字体安装）
-4. **配置后端地址**：编辑 `%PROGRAMDATA%\PsdRenderWorker\config.json`
+4. **配置后端地址**：启动 Worker，在界面「配置」面板将「后端 API 地址」改为管理后台实际地址（默认 `http://localhost:3000`）并点击「保存配置」；
+   也可直接编辑 `%PROGRAMDATA%\PsdRenderWorker\config.json`（键名以 config.example.json 为准）：
    ```json
    {
-     "apiBaseUrl": "https://api.example.com",
-     "nodeId": "worker-gz-01",
-     "logLevel": "info"
+     "backendUrl": "https://api.example.com",
+     "heartbeatIntervalSec": 30,
+     "claimMaxWaitSec": 20
    }
    ```
-5. **首次注册**：启动 Worker，在 Admin UI "Worker 管理" 中批准首次注册
+5. **激活连接（推荐：授权码模式）**：在管理后台「Worker 授权码」点击「生成授权码」，将 6 位授权码（如 `K9F-2X7`）输入 Worker 窗口的「Worker 授权激活」卡片，点击「激活并连接」即可自动注册上线（授权码 24 小时有效、仅可使用一次）
+   - 备选（预共享密钥模式）：在后端配置 `WORKER_REGISTER_SECRET`，并将相同值填入 Worker `config.json` 的 `registerSecret` 字段；推荐使用授权码模式，无需分发长效密钥
 
 ### 3.3 验证 Worker 连接
 
@@ -303,7 +306,7 @@ sudo cp psd-render-api/deploy/nginx.conf.example /etc/nginx/conf.d/psd-render-ap
 
 编辑 `/etc/nginx/conf.d/psd-render-api.conf`：
 - 将 `api.example.com` 替换为实际域名
-- 调整 `client_max_body_size`（建议 200m，与 MAX_INPUT_SIZE_MB 匹配）
+- 调整 `client_max_body_size`（建议 300m，与 MAX_PSD_SIZE_MB 匹配）
 - 调整 Worker 内部接口的 IP 白名单（`allow` 行）
 
 在 `/etc/nginx/nginx.conf` 的 `http {}` 块内添加限流区域：
@@ -329,8 +332,8 @@ sudo systemctl reload nginx
 # HTTPS 验证
 curl -sI https://api.example.com/health | head -5
 
-# 限流验证（连续打 100 个请求，应出现 429）
-for i in $(seq 1 100); do curl -s -o /dev/null -w "%{http_code}\n" https://api.example.com/health; done | sort | uniq -c
+# 限流验证（连续打 100 个请求到鉴权端点，应出现 429）
+for i in $(seq 1 100); do curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer sk_live_xxx" https://api.example.com/v1/templates; done | sort | uniq -c
 ```
 
 ---
@@ -510,7 +513,7 @@ docker compose build --no-cache api
 
 1. 检查渲染机网络：`ping api.example.com`
 2. 检查 443 端口：`Test-NetConnection api.example.com -Port 443`
-3. 检查 Worker 配置文件 `config.json` 中 `apiBaseUrl`
+3. 检查 Worker 配置文件 `config.json` 中 `backendUrl` 是否指向管理后台实际地址
 4. 查看 Worker 日志：`%PROGRAMDATA%\PsdRenderWorker\logs\worker-YYYY-MM-DD.jsonl`
 
 ### 7.5 告警未触发通知
@@ -590,6 +593,6 @@ SQLite 默认 `SERIALIZABLE` 隔离级别，事务串行执行，**无竞态**�
 | `prisma/schema.prisma` | SQLite schema（唯一活跃版本） |
 | `prisma/schema.sqlite.prisma` | SQLite schema 副本（switch-db.mjs 源文件） |
 | `prisma/schema.postgres.prisma` | PostgreSQL schema（已不维护，仅作未来切换参考） |
-| `prisma/migrations/` | SQLite 迁移文件（17 个） |
+| `prisma/migrations/` | SQLite 迁移文件 |
 | `prisma/migrations-pg/` | PostgreSQL 迁移文件（已不维护） |
 | `scripts/switch-db.mjs` | 数据库 schema 切换脚本（仅 dev 用） |

@@ -149,6 +149,9 @@ export async function adminRoutes(app: FastifyInstance) {
                   stage: { type: 'string', nullable: true },
                   progress: { type: 'integer' },
                   errorCode: { type: 'string', nullable: true },
+                  // 失败原因透出给 Admin UI（数据库已存 errorMessage，外部 API 也返回，
+                  // 此前 Admin 接口不返回导致管理员看不到失败原因，只能盲点重试）
+                  errorMessage: { type: 'string', nullable: true },
                   // 修复：handler 实际返回 j.templateVersion.template.name（字符串），
                   //   原 schema 声明为 type:'object' 导致 fast-json-stringify 按字符索引
                   //   把字符串序列化为 {"0":"挂","1":"历",...} 对象，前端 escapeHtml 后显示 [object Object]
@@ -194,6 +197,7 @@ export async function adminRoutes(app: FastifyInstance) {
           stage: j.stage,
           progress: j.progress,
           errorCode: j.errorCode,
+          errorMessage: j.errorMessage,
           template: j.templateVersion.template.name,
           worker: j.worker?.code ?? null,
           workerCustomCode: j.worker?.customCode ?? null,
@@ -405,6 +409,9 @@ export async function adminRoutes(app: FastifyInstance) {
         latestVersion: t.versions[0]?.version ?? 0,
         published: t.versions[0]?.published ?? false,
         thumbnailObjectKey: t.versions[0]?.thumbnailObjectKey ?? null,
+      tenantId: t.tenantId,
+      ownerUserId: t.ownerUserId ?? null,
+      visibility: t.visibility === 'private' ? 'private' : 'public',
         createdAt: t.createdAt,
       })),
     });

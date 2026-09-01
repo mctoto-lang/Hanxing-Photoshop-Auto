@@ -77,9 +77,9 @@ export const loginPageHtml = `<!DOCTYPE html>
             password: document.getElementById('password').value,
           }),
         });
-        const data = await r.json();
+        const data = await r.json().catch(() => null);
         if (!r.ok) {
-          err.textContent = data.message || '登录失败';
+          err.textContent = (data && (data.message || data.error)) || '登录失败 (HTTP ' + r.status + ')';
           err.style.display = 'block';
           btn.disabled = false; btn.textContent = '登录';
           return false;
@@ -88,7 +88,9 @@ export const loginPageHtml = `<!DOCTYPE html>
         window.location.href = '/admin';
         return false;
       } catch (ex) {
-        err.textContent = ex.message;
+        // 网关返回 HTML 错误页等非 JSON 内容时，直接显示 ex.message 会得到
+        // "Unexpected token '<'..." 之类技术报错，对使用者无意义
+        err.textContent = '服务暂不可用，请稍后重试（' + (ex.message || '网络错误') + '）';
         err.style.display = 'block';
         btn.disabled = false; btn.textContent = '登录';
         return false;

@@ -169,9 +169,16 @@ export async function renderJobRoutes(app: FastifyInstance) {
     const user = req.user as any;
     const traceId = genTraceId();
 
+    const viewer =
+      typeof user.userId === 'string' && user.userId
+        ? { userId: user.userId, userAdmin: user.userAdmin === true }
+        : user.userAdmin === true
+          ? { userAdmin: true }
+          : undefined;
     const { job, created } = await renderJobService.create({
       tenantId: user.tenantId ?? 'default',
       apiKeyId: user.apiKeyId,
+      viewer,
       idempotencyKey,
       templateVersionId: parsed.data.templateVersionId,
       input: parsed.data.input as any,
@@ -226,7 +233,8 @@ export async function renderJobRoutes(app: FastifyInstance) {
                 version: { type: 'string', description: '模板版本 ID' },
               },
             },
-            resultUrl: { type: 'string', description: '结果下载地址（SUCCEEDED 时返回，默认 3 天有效，由 OUTPUT_RETENTION_DAYS 控制）' },
+            resultUrl: { type: 'string', description: '结果下载地址（SUCCEEDED 时返回，默认 3 天有效，由 OUTPUT_RETENTION_DAYS 控制；local 存储模式为相对路径 /storage/download?key=…' },
+            resultToken: { type: 'string', nullable: true, description: '结果下载签名令牌（local 存储模式返回，调用方以 Authorization: Bearer 携带；COS 模式为 null）' },
             resultExpiresAt: { type: 'string', format: 'date-time', nullable: true, description: '结果下载地址过期时间' },
             errorCode: { type: 'string', nullable: true, description: '失败时的错误码' },
             errorMessage: { type: 'string', nullable: true, description: '失败时的错误详情' },
@@ -297,6 +305,7 @@ export async function renderJobRoutes(app: FastifyInstance) {
         404: { $ref: 'ErrorResponse#' },
         409: {
           type: 'object',
+          description: '业务级状态返回（非错误响应）：任务当前状态不允许取消（如已完成/失败）。返回当前 job 状态供客户端决策。',
           required: ['jobId', 'status', 'updated', 'message'],
           properties: {
             jobId: { type: 'string' },

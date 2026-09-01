@@ -120,7 +120,11 @@ function patchPsdForSmartObjectDetection(): void {
       }
     };
   } catch (err) {
-    // patch 失败时智能对象会被误判为 pixel，但不影响其他类型图层解析
+    // patch 失败时智能对象会被误判为 pixel，模板绑定配置会受影响；
+    // 不中断解析（其他类型图层不受影响），但必须在服务日志中留下线索
+    console.warn('[psd-worker] PSD 智能对象检测 monkey-patch 失败，后续解析会将智能对象误判为 pixel 图层', {
+      err: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
@@ -450,15 +454,16 @@ async function generateThumbnailWithAgPsd(psdBuffer: Buffer, maxWidth: number): 
       skipLayerImageData: true,
     });
 
-    // 方案1：合成图（psd.canvas）— 检查覆盖率，仅当合成图完整时使用
+    // 方案1：合成图（psd.canvas）— 透明背景样机（T恤/手机壳等）不透明覆盖率
+    // 天然偏低，仅要求「存在内容」（>0.2%，排除仅剩一条像素带的残缺读取）；
+    // 透明区由 resizeToSquareThumbnail 的白底 flatten 兜底，不丢内容
     const compositeCanvas = (psd as any).canvas;
     if (compositeCanvas) {
       const ctx = compositeCanvas.getContext('2d');
       const imgData = ctx?.getImageData?.();
       if (imgData && imgData.data && imgData.data.length > 0) {
         const coverage = computeOpaqueCoverage(imgData.data);
-        // 覆盖率 > 50% 认为合成图完整；低于此值可能是残缺的（如仅剩一条像素带）
-        if (coverage > 0.5) {
+        if (coverage > 0.002) {
           return await resizeToSquareThumbnail(imgData, maxWidth);
         }
       }

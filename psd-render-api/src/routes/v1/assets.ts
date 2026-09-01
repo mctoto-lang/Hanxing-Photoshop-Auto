@@ -151,6 +151,7 @@ export async function assetsRoutes(app: FastifyInstance) {
             sizeBytes: { type: 'integer', description: '资产实际字节数' },
           },
         },
+        400: { $ref: 'ErrorResponse#', description: '路径参数校验失败' },
         401: { $ref: 'ErrorResponse#', description: 'API Key 无效或缺少 tenantId' },
         403: { $ref: 'ErrorResponse#', description: 'IP 白名单拒绝 / 作用域不足' },
         422: { $ref: 'ErrorResponse#', description: 'INVALID_INPUT_ASSET：资产不存在/不属于当前租户/未上传完成/大小不符限制/已被其他任务使用' },

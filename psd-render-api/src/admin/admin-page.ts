@@ -147,6 +147,16 @@ export const adminPageHtml = `<!DOCTYPE html>
     .bootstrap-code-box .code { display: inline-block; font-size: 36px; font-weight: 700; color: #81c784; font-family: Consolas, monospace; letter-spacing: 4px; user-select: all; padding: 16px 28px; background: #1a1f2e; border: 1px solid #2a3142; border-radius: 6px; }
     .bootstrap-result-box { display: flex; align-items: center; gap: 8px; background: #1a1f2e; border: 1px solid #2a3142; border-radius: 4px; padding: 10px 12px; }
     .bootstrap-result-box code { flex: 1; word-break: break-all; font-size: 13px; color: #81c784; user-select: all; }
+    /* toast 提示：非阻断，替代系统 alert */
+    #toastContainer { position: fixed; top: 16px; right: 16px; z-index: 2000; display: flex; flex-direction: column; gap: 8px; max-width: 380px; }
+    .toast { padding: 10px 14px; border-radius: 6px; font-size: 13px; border: 1px solid #2a3142; background: #1a1f2e; color: #e6e6e6; box-shadow: 0 4px 12px rgba(0,0,0,0.45); word-break: break-all; opacity: 1; transition: opacity 0.4s; }
+    .toast.hide { opacity: 0; }
+    .toast.error { border-color: #e57373; color: #f8b4b4; }
+    .toast.success { border-color: #81c784; color: #b9e4bb; }
+    .toast.info { border-color: #4fc3f7; color: #a8dcf5; }
+    /* 上传进度条 */
+    .upload-progress { height: 8px; background: #2a3142; border-radius: 4px; overflow: hidden; margin-top: 8px; }
+    .upload-progress-bar { height: 100%; width: 0%; background: #4fc3f7; transition: width 0.2s; }
   </style>
 </head>
 <body>
@@ -166,6 +176,7 @@ export const adminPageHtml = `<!DOCTYPE html>
       </div>
     </div>
   </div>
+  <div id="toastContainer" aria-live="polite"></div>
 
   <h2>概览</h2>
   <div class="stats" id="stats"><div class="empty">加载中...</div></div>
@@ -185,7 +196,7 @@ export const adminPageHtml = `<!DOCTYPE html>
   <h2>存储设置</h2>
   <div class="stat" id="storageSettings"><div class="empty">加载中...</div></div>
 
-  <h2>最近任务 <span style="font-size:11px;color:#8b95a7;font-weight:normal;">（最近 30 条，滚动查看）</span> <div style="float:right;margin-top:4px;display:flex;gap:8px;"><button class="btn-act danger" onclick="batchDeleteJobs()">批量删除任务日志</button><button class="btn-act danger" onclick="batchCancel()">批量取消进行中任务</button></div></h2>
+  <h2 id="jobsSection">最近任务 <span style="font-size:11px;color:#8b95a7;font-weight:normal;">（最近 30 条，滚动查看）</span> <div style="float:right;margin-top:4px;display:flex;gap:8px;"><button class="btn-act danger" onclick="batchDeleteJobs()">批量删除任务日志</button><button class="btn-act danger" onclick="batchCancel()">批量取消进行中任务</button></div></h2>
   <div class="scroll-table"><table id="jobs"><tr><td class="empty">加载中...</td></tr></table></div>
 
   <h2>模板 <button class="btn-act" style="float:right;margin-top:4px" onclick="openTemplateUpload()">上传 PSD 模板</button></h2>
@@ -248,6 +259,37 @@ export const adminPageHtml = `<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- 字体上传模态框：替代浏览器 prompt 收集许可证备注，并统一许可证口径说明 -->
+  <div class="modal-mask" id="fontUploadModal">
+    <div class="modal license-modal">
+      <div class="modal-header">
+        <h3>上传字体</h3>
+        <button class="btn-secondary" onclick="closeFontUpload()">关闭</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-row">
+          <label for="fontUploadFile">字体文件 *</label>
+          <input id="fontUploadFile" type="file" accept=".ttf,.otf,.ttc" />
+          <div class="form-hint">支持 .ttf / .otf / .ttc 格式</div>
+        </div>
+        <div class="form-row">
+          <label for="fontUploadLicense">许可证备注</label>
+          <textarea id="fontUploadLicense" maxlength="500" placeholder="请输入字体许可证备注（来源与授权说明）"></textarea>
+          <div class="form-hint">未填写许可证备注的字体不能启用（可上传后在字体列表中补充编辑）；最多 500 个字符</div>
+        </div>
+        <div class="upload-progress" id="fontUploadProgress" style="display:none"><div class="upload-progress-bar" id="fontUploadProgressBar"></div></div>
+        <div class="form-hint" id="fontUploadStatus"></div>
+      </div>
+      <div class="modal-footer">
+        <span></span>
+        <div>
+          <button class="btn-secondary" onclick="closeFontUpload()">取消</button>
+          <button class="btn-primary" id="fontUploadSave" onclick="submitFontUpload()">上传</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="modal-mask" id="workerNameModal">
     <div class="modal license-modal"><div class="modal-header"><h3>编辑 Worker 节点名称</h3><button class="btn-secondary" onclick="closeWorkerNameEditor()">关闭</button></div><div class="modal-body"><div class="form-row"><label>节点名称</label><input id="workerNameInput" maxlength="100" /></div><div id="workerNameStatus" class="form-hint"></div></div><div class="modal-footer"><span></span><div><button class="btn-secondary" onclick="closeWorkerNameEditor()">取消</button><button class="btn-primary" id="workerNameSave" onclick="saveWorkerNameEditor()">保存</button></div></div></div>
   </div>
@@ -261,7 +303,7 @@ export const adminPageHtml = `<!DOCTYPE html>
   </div>
 
   <div class="modal-mask" id="templateUploadModal">
-    <div class="modal license-modal"><div class="modal-header"><h3>上传 PSD 模板</h3><button class="btn-secondary" onclick="closeTemplateUpload()">关闭</button></div><div class="modal-body"><div class="form-row"><label>模板名称</label><input id="templateUploadName" maxlength="100" /></div><div class="form-row"><label>PSD 文件</label><input id="templateUploadFile" type="file" accept=".psd,image/vnd.adobe.photoshop" /></div><div class="form-hint" style="margin-top:-6px">最大 300MB，仅支持 .psd 文件</div><div class="form-row"><label>最低 Photoshop 版本</label><input id="templateUploadPsVersion" value="25.0" maxlength="20" /></div><div class="form-hint" id="templateUploadStatus"></div></div><div class="modal-footer"><span></span><div><button class="btn-secondary" onclick="closeTemplateUpload()">取消</button><button class="btn-primary" id="templateUploadSave" onclick="submitTemplateUpload()">上传并解析</button></div></div></div>
+    <div class="modal license-modal"><div class="modal-header"><h3>上传 PSD 模板</h3><button class="btn-secondary" onclick="closeTemplateUpload()">关闭</button></div><div class="modal-body"><div class="form-row"><label>模板名称</label><input id="templateUploadName" maxlength="100" /></div><div class="form-row"><label>PSD 文件</label><input id="templateUploadFile" type="file" accept=".psd,image/vnd.adobe.photoshop" /></div><div class="form-hint" style="margin-top:-6px">最大 300MB，仅支持 .psd 文件</div><div class="form-row"><label>最低 Photoshop 版本</label><input id="templateUploadPsVersion" value="25.0" maxlength="20" /></div><div class="form-hint" id="templateUploadStatus"></div><div class="upload-progress" id="templateUploadProgress" style="display:none"><div class="upload-progress-bar" id="templateUploadProgressBar"></div></div></div><div class="modal-footer"><span></span><div><button class="btn-secondary" id="templateUploadCancel" style="display:none" onclick="cancelTemplateUpload()">取消上传</button><button class="btn-secondary" onclick="closeTemplateUpload()">取消</button><button class="btn-primary" id="templateUploadSave" onclick="submitTemplateUpload()">上传并解析</button></div></div></div>
   </div>
 
   <div class="modal-mask" id="confirmModal">
@@ -286,7 +328,7 @@ export const adminPageHtml = `<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- API Key 创建/轮换结果弹框（替代浏览器 alert，含复制图标） -->
+<!-- API Key 明文弹框（创建一次性提示 / 随时查看共用，含复制图标） -->
   <div class="modal-mask" id="apiKeyResultModal">
     <div class="modal apikey-form-modal">
       <div class="modal-header"><h3 id="apiKeyResultTitle">API Key 创建成功</h3><button class="btn-secondary" onclick="closeApiKeyResult()">关闭</button></div>
@@ -341,14 +383,55 @@ export const adminPageHtml = `<!DOCTYPE html>
   </div>
 
   <script>
-    // 统一 fetch：401 跳转登录页
+    // 统一 fetch：401 跳转登录页；非 2xx 抛出后端错误消息。
+    // 修复：原先不检查 r.ok，错误响应体被当作正常数据返回，导致
+    // 「强制取消」失败时误报「任务已是终态」、「批量取消」显示「已取消 undefined 个」。
     async function fetchJSON(url, opts) {
       const r = await fetch(url, opts);
       if (r.status === 401) {
         window.location.href = '/admin/login';
         return new Promise(() => {});
       }
-      return r.json();
+      const data = await r.json().catch(() => null);
+      if (!r.ok) {
+        const err = new Error((data && (data.message || data.error)) || ('HTTP ' + r.status + (r.statusText ? ' ' + r.statusText : '')));
+        err.status = r.status;
+        throw err;
+      }
+      return data;
+    }
+    // 非阻断 toast 提示（替代系统 alert）：textContent 写入防注入，4 秒后自动消失
+    function showToast(message, type) {
+      const container = document.getElementById('toastContainer');
+      if (!container) return;
+      const el = document.createElement('div');
+      el.className = 'toast ' + (type || 'info');
+      el.textContent = message;
+      container.appendChild(el);
+      setTimeout(() => el.classList.add('hide'), 3600);
+      setTimeout(() => el.remove(), 4100);
+    }
+    // 带进度与取消的文件上传（fetch 不支持上传进度，需用 XHR）
+    // onStart 回调暴露 xhr，供调用方实现「取消上传」（xhr.abort()）
+    function uploadWithProgress(url, file, contentType, onProgress, onStart) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        if (onStart) onStart(xhr);
+        xhr.open('POST', url);
+        xhr.setRequestHeader('Content-Type', contentType);
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
+        };
+        xhr.onload = () => {
+          let data = null;
+          try { data = JSON.parse(xhr.responseText); } catch (e) { data = null; }
+          if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+          else reject(new Error((data && (data.message || data.error)) || ('HTTP ' + xhr.status)));
+        };
+        xhr.onerror = () => reject(new Error('网络错误，上传失败'));
+        xhr.onabort = () => reject(new Error('已取消上传'));
+        xhr.send(file);
+      });
     }
     function fmtDate(d) {
       if (!d) return '-';
@@ -392,10 +475,16 @@ export const adminPageHtml = `<!DOCTYPE html>
           modal.classList.remove('open');
           accept.onclick = null;
           cancel.onclick = null;
+          modal.onclick = null;
+          document.removeEventListener('keydown', onKey);
           resolve(result);
         };
+        // ESC / 点击遮罩均视为取消（仅点击 mask 本身，模态框内容区点击不冒泡取消）
+        const onKey = (e) => { if (e.key === 'Escape') finish(false); };
         accept.onclick = () => finish(true);
         cancel.onclick = () => finish(false);
+        modal.onclick = (e) => { if (e.target === modal) finish(false); };
+        document.addEventListener('keydown', onKey);
         modal.classList.add('open');
       });
     }
@@ -510,6 +599,24 @@ export const adminPageHtml = `<!DOCTYPE html>
       const status = document.getElementById('testRenderStatus');
       const input = {};
       const fields = Array.from(document.querySelectorAll('[data-test-binding]'));
+      // 提交前本地校验必填绑定并高亮缺失项，避免图片传完后才收到服务端报错串
+      const currentTemplate = testTemplates.find(t => t.templateVersionId === document.getElementById('testTemplate').value);
+      const bindings = (currentTemplate && currentTemplate.layerSchema && currentTemplate.layerSchema.bindings) || [];
+      const missing = [];
+      for (const field of fields) {
+        const id = field.dataset.testBinding;
+        const b = bindings.find(x => x.bindingId === id);
+        if (!b || !b.required) continue;
+        const isEmpty = field.dataset.testKind === 'text' ? !field.value.trim() : !(field.files && field.files[0]);
+        field.style.borderColor = isEmpty ? '#e57373' : '';
+        if (isEmpty) missing.push(b.label || id);
+      }
+      status.style.color = '';
+      if (missing.length) {
+        status.style.color = '#e57373';
+        status.textContent = '以下必填绑定未填写: ' + missing.join('、');
+        return;
+      }
       testRenderSubmitting = true;
       status.textContent = '正在准备测试资源...';
       try {
@@ -521,9 +628,12 @@ export const adminPageHtml = `<!DOCTYPE html>
           } else if (field.files && field.files[0]) {
             const file = field.files[0];
             const templateVersionId = document.getElementById('testTemplate').value;
-            const response = await fetch('/admin/api/test/assets?fileName=' + encodeURIComponent(file.name) + '&templateVersionId=' + encodeURIComponent(templateVersionId), { method: 'POST', headers: { 'Content-Type': file.type }, body: file });
-            const data = await response.json();
-            if (!response.ok) throw new Error(data.message || '图片上传失败');
+            status.textContent = '正在上传图片 ' + file.name + ' 0%...';
+            const data = await uploadWithProgress(
+              '/admin/api/test/assets?fileName=' + encodeURIComponent(file.name) + '&templateVersionId=' + encodeURIComponent(templateVersionId),
+              file, file.type,
+              (pct) => { status.textContent = '正在上传图片 ' + file.name + ' ' + pct + '%...'; });
+            if (!data || !data.assetId) throw new Error((data && data.message) || '图片上传失败');
             input[id] = { assetId: data.assetId };
           }
         }
@@ -531,11 +641,23 @@ export const adminPageHtml = `<!DOCTYPE html>
         const jsxTimeoutSeconds = Number(document.getElementById('jsxTimeoutSeconds').value || 600);
         const result = await fetchJSON('/admin/api/test/render-jobs', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ templateVersionId: document.getElementById('testTemplate').value, targetWorkerId: document.getElementById('testWorker').value, jsxTimeoutSeconds, input, output: { format: document.getElementById('testOutputFormat').value } }) });
         if (!result.jobId) throw new Error(result.message || '创建测试任务失败');
-        status.textContent = '测试任务已提交：' + result.jobId;
+        status.textContent = '测试任务已提交：' + result.jobId + '（进度见下方「最近任务」）';
         // 提交成功后重置使用标记，允许下次刷新重建表单
         testRenderInUse = false;
-        loadJobs();
+        await loadJobs();
+        // 引导：滚动到「最近任务」并高亮该任务行，用户不必自己找
+        const section = document.getElementById('jobsSection');
+        if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        setTimeout(() => {
+          const cell = Array.from(document.querySelectorAll('#jobs code')).find(c => c.textContent === result.jobId);
+          const row = cell && cell.closest('tr');
+          if (row) {
+            row.style.outline = '1px solid #ffd54f';
+            setTimeout(() => { row.style.outline = ''; }, 5000);
+          }
+        }, 400);
       } catch (e) {
+        status.style.color = '#e57373';
         status.textContent = '提交失败: ' + e.message;
       } finally {
         testRenderSubmitting = false;
@@ -604,12 +726,16 @@ export const adminPageHtml = `<!DOCTYPE html>
       if (!jobs.length) { document.getElementById('jobs').innerHTML = '<tr><td class="empty">暂无任务</td></tr>'; return; }
       // 后端拉取 30 条用于批量取消覆盖范围；表格容器限高滚动，单页展示约 10 条，其余滚动查看
       document.getElementById('jobs').innerHTML = \`
-        <thead><tr><th>任务编号</th><th>状态</th><th>模板</th><th>尝试</th><th>阶段</th><th>进度</th><th>Worker</th><th>创建时间</th><th>操作</th></tr></thead>
+        <thead><tr><th>任务编号</th><th>状态</th><th>错误</th><th>模板</th><th>尝试</th><th>阶段</th><th>进度</th><th>Worker</th><th>创建时间</th><th>操作</th></tr></thead>
         <tbody>
         \${jobs.map(j => {
           const isActive = ['QUEUED','LEASED','PROCESSING','CANCELLING'].includes(j.status);
           const isLeased = ['LEASED','PROCESSING'].includes(j.status);
           const isFailed = j.status === 'FAILED';
+          // 错误列：错误码徽标，悬停显示完整失败原因（数据库已存，此前接口不透出）
+          const errCell = j.errorCode
+            ? '<span class="badge FAILED" title="' + escapeHtml(j.errorMessage || j.errorCode) + '">' + escapeHtml(j.errorCode) + '</span>'
+            : '<span style="color:#777">-</span>';
           let ops = '-';
           if (isActive) {
             ops = '<button class="btn-act danger" onclick="jobForceCancel(\\'' + j.jobId + '\\')">强制取消</button>';
@@ -627,6 +753,7 @@ export const adminPageHtml = `<!DOCTYPE html>
           return \`<tr>
             <td><code>\${escapeHtml(j.jobId)}</code></td>
             <td><span class="badge \${j.status}">\${jobStatusLabel(j.status)}</span></td>
+            <td>\${errCell}</td>
             <td>\${escapeHtml(j.template)}</td>
             <td>\${j.attempt}/\${j.maxAttempts ?? 3}</td>
             <td>\${jobStageLabel(j.stage)}</td>
@@ -649,7 +776,7 @@ export const adminPageHtml = `<!DOCTYPE html>
           let ops = '';
           // M5：DRAFT 状态可编辑图层绑定
           if (t.status === 'DRAFT' || t.status === 'REPUBLISH_REQUIRED' || t.status === 'ARCHIVED') {
-            ops += '<button class="btn-act" onclick="openBindingEditor(\\'' + t.templateId + '\\', \\'' + escapeHtml(t.name) + '\\')">编辑绑定</button>';
+            ops += '<button class="btn-act" onclick="openBindingEditor(\\'' + t.templateId + '\\')">编辑绑定</button>';
           }
           if (!t.published) ops += '<button class="btn-act" onclick="tplPublish(\\'' + t.templateId + '\\')">发布</button>';
           // DRAFT / REPUBLISH_REQUIRED / ARCHIVED 均允许删除（PUBLISHED 需先归档）
@@ -744,12 +871,16 @@ export const adminPageHtml = `<!DOCTYPE html>
         }
       } catch (e) {
         if (wrap) wrap.innerHTML = '<span class="thumb-err">失败</span><button class="btn-act" style="margin-left:4px;padding:1px 4px;font-size:10px" onclick="regenThumbnail(\\'' + templateId + '\\')">重试</button>';
-        alert('缩略图重新生成失败: ' + (e.message || '未知错误'));
+        showToast('缩略图重新生成失败: ' + (e.message || '未知错误'), 'error');
       }
     }
 
+    let fontsById = new Map();
     async function loadFonts() {
       const { fonts } = await fetchJSON('/admin/api/fonts');
+      // id → 字体映射：内联 onclick 只传 fontId，名称等从 Map 取，
+      // 避免字体名含引号（如 O'Brien）时破坏 onclick 的 JS 字符串
+      fontsById = new Map((fonts || []).map(f => [f.fontId, f]));
       await loadFontSettings(fonts || []);
       if (!fonts || !fonts.length) { document.getElementById('fonts').innerHTML = '<tr><td class="empty">暂无字体</td></tr>'; return; }
       document.getElementById('fonts').innerHTML = \`
@@ -766,19 +897,25 @@ export const adminPageHtml = `<!DOCTYPE html>
             <td><code title="\${escapeHtml(f.sha256)}">\${escapeHtml(f.sha256.slice(0,8))}...</code></td>
             <td class="ops">
               <button class="btn-act \${f.published ? 'warn' : ''}" onclick="fontToggle('\${f.fontId}', \${!f.published})" \${(!f.published && !canPublish) ? 'disabled title="请先编辑许可证备注再启用"' : ''}>\${f.published ? '禁用' : '启用'}</button>
-              <button class="btn-act" onclick="fontEditLicense('\${f.fontId}', '\${escapeHtml(f.licenseNote || '')}')">编辑许可证</button>
-              <button class="btn-act danger" onclick="fontDelete('\${f.fontId}', '\${escapeHtml(f.familyName || '')}', '\${escapeHtml(f.postscriptName || '')}')">删除</button>
+              <button class="btn-act" onclick="fontEditLicense('\${f.fontId}')">编辑许可证</button>
+              <button class="btn-act danger" onclick="fontDelete('\${f.fontId}')">删除</button>
             </td>
           </tr>\`;
         }).join('')}
         </tbody>\`;
     }
 
+    // 兜底字体下拉的防重建标记：用户已更改但未保存、或下拉正处于焦点（展开）时，
+    // 5 秒定时 loadAll 不重建该表单（模式同 storageSettingsInUse），避免选择被强制收起
+    let fontSettingsInUse = false;
     async function loadFontSettings(fonts) {
       const container = document.getElementById('fontSettings');
+      const prev = document.getElementById('fallbackFontVersionId');
+      if (fontSettingsInUse) return;
+      if (prev && prev === document.activeElement) return;
       const config = await fetchJSON('/admin/api/font-settings');
       const published = fonts.filter(f => f.published);
-      container.innerHTML = '<div class="form-row"><label>全局兜底字体</label><select id="fallbackFontVersionId"><option value="">不设置</option>'
+      container.innerHTML = '<div class="form-row"><label>全局兜底字体</label><select id="fallbackFontVersionId" onchange="fontSettingsInUse=true"><option value="">不设置</option>'
         + published.map(f => '<option value="' + escapeHtml(f.fontId) + '">' + escapeHtml(f.familyName + ' / ' + f.postscriptName) + '</option>').join('')
         + '</select><div class="form-hint">指定字体或 PSD 原字体不可用时使用，字体缺失不会中断任务</div></div>'
         + '<button class="btn-primary" onclick="saveFontSettings()">保存兜底字体</button><span class="form-hint" id="fontSettingsStatus"></span>';
@@ -792,6 +929,8 @@ export const adminPageHtml = `<!DOCTYPE html>
       try {
         await fetchJSON('/admin/api/font-settings', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ fallbackFontVersionId: value }) });
         status.textContent = '已保存';
+        // 保存成功后重置防重建标记，允许下次刷新重建表单以反映最新状态
+        fontSettingsInUse = false;
       } catch (e) { status.textContent = '保存失败: ' + e.message; }
     }
 
@@ -814,7 +953,7 @@ export const adminPageHtml = `<!DOCTYPE html>
           const scopes = (k.scopes && k.scopes.length) ? k.scopes.map(s => '<code>'+escapeHtml(s)+'</code>').join(' ') : '<span style="color:#8b95a7">全部</span>';
           let ops = '';
           if (k.active) {
-            ops += '<button class="btn-act warn" onclick="apiKeyRotate(\\'' + k.id + '\\')">轮换</button>';
+            ops += '<button class="btn-act" onclick="apiKeyReveal(' + JSON.stringify(k.id) + ')">查看</button>';
             ops += '<button class="btn-act warn" onclick="apiKeyDisable(\\'' + k.id + '\\')">禁用</button>';
             if (k.quotaPerDay) ops += '<button class="btn-act" onclick="apiKeyResetQuota(\\'' + k.id + '\\')">重置配额</button>';
             ops += '<button class="btn-act" onclick="apiKeyEdit(\\'' + k.id + '\\')">编辑</button>';
@@ -934,11 +1073,13 @@ export const adminPageHtml = `<!DOCTYPE html>
     }
 
     // 展示明文 key 结果弹框（替代 alert）
-    function showApiKeyResult(title, plaintext, apiKey) {
+    function showApiKeyResult(title, plaintext, apiKey, viewable = false) {
       document.getElementById('apiKeyResultTitle').textContent = title;
       document.getElementById('apiKeyResultPlaintext').textContent = plaintext;
       document.getElementById('apiKeyResultName').textContent = apiKey?.name || '-';
       document.getElementById('apiKeyResultPrefix').textContent = (apiKey?.keyPrefix || '') + '...';
+      // 查看模式：明文可随时再看，不显示「仅一次」警告
+      document.getElementById('apiKeyResultWarn').style.display = viewable ? 'none' : '';
       // 重置复制按钮文案
       const btn = document.getElementById('apiKeyResultCopyBtn');
       btn.classList.remove('copied');
@@ -983,15 +1124,13 @@ export const adminPageHtml = `<!DOCTYPE html>
       }, 2000);
     }
 
-    async function apiKeyRotate(id) {
-      if (!await showConfirm('确定轮换该 API Key？旧 Key 将立即失效，新 Key 仅显示一次。')) return;
+    async function apiKeyReveal(id) {
       try {
-        const r = await fetchJSON('/admin/api/api-keys/'+id+'/rotate', { method: 'POST' });
-        loadApiKeys();
+        const r = await fetchJSON('/admin/api/api-keys/'+id+'/plaintext');
         if (r && r.plaintextKey) {
-          showApiKeyResult('API Key 轮换成功', r.plaintextKey, r.apiKey);
+          showApiKeyResult('API Key 明文', r.plaintextKey, null, true);
         }
-      } catch (e) { alert('轮换失败: ' + e.message); }
+      } catch (e) { showToast('查看失败: ' + e.message, 'error'); }
     }
 
     async function apiKeyDisable(id) {
@@ -999,7 +1138,7 @@ export const adminPageHtml = `<!DOCTYPE html>
       try {
         await fetchJSON('/admin/api/api-keys/'+id+'/disable', { method: 'POST' });
         loadApiKeys();
-      } catch (e) { alert('禁用失败: ' + e.message); }
+      } catch (e) { showToast('禁用失败: ' + e.message, 'error'); }
     }
 
     async function apiKeyEnable(id) {
@@ -1007,7 +1146,7 @@ export const adminPageHtml = `<!DOCTYPE html>
       try {
         await fetchJSON('/admin/api/api-keys/'+id+'/enable', { method: 'POST' });
         loadApiKeys();
-      } catch (e) { alert('启用失败: ' + e.message); }
+      } catch (e) { showToast('启用失败: ' + e.message, 'error'); }
     }
 
     async function apiKeyResetQuota(id) {
@@ -1015,7 +1154,7 @@ export const adminPageHtml = `<!DOCTYPE html>
       try {
         await fetchJSON('/admin/api/api-keys/'+id+'/reset-quota', { method: 'POST' });
         loadApiKeys();
-      } catch (e) { alert('重置失败: ' + e.message); }
+      } catch (e) { showToast('重置失败: ' + e.message, 'error'); }
     }
 
     async function apiKeyDelete(id) {
@@ -1024,19 +1163,23 @@ export const adminPageHtml = `<!DOCTYPE html>
       try {
         await fetchJSON('/admin/api/api-keys/'+id, { method: 'DELETE' });
         loadApiKeys();
-      } catch (e) { alert('删除失败: ' + e.message); }
+      } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
     }
 
     // ===== 操作函数 =====
     async function workerForceOffline(id) {
       if (!await showConfirm('确定强制下线该 Worker？')) return;
-      await fetchJSON('/admin/api/workers/'+id+'/force-offline', { method: 'POST' });
-      loadWorkers();
+      try {
+        await fetchJSON('/admin/api/workers/'+id+'/force-offline', { method: 'POST' });
+        loadWorkers();
+      } catch (e) { showToast('强制下线失败: ' + e.message, 'error'); }
     }
     async function workerReapprove(id) {
       if (!await showConfirm('确定重新批准该 Worker？')) return;
-      await fetchJSON('/admin/api/workers/'+id+'/reapprove', { method: 'POST' });
-      loadWorkers();
+      try {
+        await fetchJSON('/admin/api/workers/'+id+'/reapprove', { method: 'POST' });
+        loadWorkers();
+      } catch (e) { showToast('重新批准失败: ' + e.message, 'error'); }
     }
     // 第四期 M9：删除 Worker 节点（需先下线且无进行中任务）
     async function workerDelete(id) {
@@ -1046,9 +1189,9 @@ export const adminPageHtml = `<!DOCTYPE html>
       try {
         const res = await fetchJSON('/admin/api/workers/'+id, { method: 'DELETE' });
         loadWorkers();
-        alert('已删除 Worker: ' + res.code);
+        showToast('已删除 Worker: ' + res.code, 'success');
       } catch (e) {
-        alert('删除失败: ' + (e.message || e.error || '未知错误'));
+        showToast('删除失败: ' + (e.message || e.error || '未知错误'), 'error');
       }
     }
     // 第四期 M9：查看 Worker 详情（含硬件画像、历史任务列表）
@@ -1155,52 +1298,62 @@ export const adminPageHtml = `<!DOCTYPE html>
     }
     async function jobForceCancel(code) {
       if (!await showConfirm('确定强制取消任务 '+code+'？')) return;
-      const r = await fetchJSON('/admin/api/jobs/'+code+'/force-cancel', { method: 'POST' });
-      alert(r.updated ? '已强制取消' : '任务已是终态');
-      loadJobs();
+      try {
+        const r = await fetchJSON('/admin/api/jobs/'+code+'/force-cancel', { method: 'POST' });
+        showToast(r.updated ? '已强制取消' : '任务已是终态，未做变更', r.updated ? 'success' : 'info');
+        loadJobs();
+      } catch (e) { showToast('强制取消失败: ' + e.message, 'error'); }
     }
     async function jobReleaseLease(code) {
       if (!await showConfirm('确定释放任务 '+code+' 的租约？任务将回到 QUEUED。')) return;
       try {
         const r = await fetchJSON('/admin/api/jobs/'+code+'/release-lease', { method: 'POST' });
-        alert('租约已释放');
-      } catch(e) { alert(e.message); }
+        showToast('租约已释放', 'info');
+      } catch(e) { showToast(e.message, 'error'); }
       loadJobs();
     }
     async function jobRetry(code) {
       if (!await showConfirm('确定重试任务 '+code+'？')) return;
       try {
         const r = await fetchJSON('/admin/api/jobs/'+code+'/retry', { method: 'POST' });
-        alert('已重新入队，attempt='+r.attempt);
-      } catch(e) { alert(e.message); }
+        showToast('已重新入队，attempt='+r.attempt, 'success');
+      } catch(e) { showToast(e.message, 'error'); }
       loadJobs();
     }
     async function batchCancel() {
       if (!await showConfirm('确定批量取消所有进行中（QUEUED/LEASED/PROCESSING/CANCELLING）任务？')) return;
-      const r = await fetchJSON('/admin/api/jobs/batch-cancel', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
-      alert('已取消 '+r.cancelled+' 个任务');
-      loadJobs();
+      try {
+        const r = await fetchJSON('/admin/api/jobs/batch-cancel', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+        showToast('已取消 ' + (r.cancelled ?? 0) + ' 个任务', 'success');
+        loadJobs();
+      } catch (e) { showToast('批量取消失败: ' + e.message, 'error'); }
     }
     async function batchDeleteJobs() {
       if (!await showConfirm('确定批量删除所有已完成（SUCCEEDED/FAILED/CANCELLED）任务日志？\\n进行中的任务不受影响。')) return;
-      const r = await fetchJSON('/admin/api/jobs/batch-delete', { method: 'POST' });
-      alert('已删除 '+r.deleted+' 条任务日志');
-      loadJobs();
+      try {
+        const r = await fetchJSON('/admin/api/jobs/batch-delete', { method: 'POST' });
+        showToast('已删除 ' + (r.deleted ?? 0) + ' 条任务日志', 'success');
+        loadJobs();
+      } catch (e) { showToast('批量删除失败: ' + e.message, 'error'); }
     }
     async function tplPublish(id) {
       if (!await showConfirm('确定发布该模板？发布后不可修改。')) return;
-      try { await fetchJSON('/admin/api/templates/'+id+'/publish', { method: 'POST' }); } catch(e) { alert(e.message); }
+      try { await fetchJSON('/admin/api/templates/'+id+'/publish', { method: 'POST' }); } catch(e) { showToast(e.message, 'error'); }
       loadTemplates();
     }
     async function tplArchive(id) {
       if (!await showConfirm('确定归档该模板？归档后将不能用于新任务。')) return;
-      await fetchJSON('/admin/api/templates/'+id+'/archive', { method: 'POST' });
-      loadTemplates();
+      try {
+        await fetchJSON('/admin/api/templates/'+id+'/archive', { method: 'POST' });
+        loadTemplates();
+      } catch (e) { showToast('归档失败: ' + e.message, 'error'); }
     }
     async function tplUnarchive(id) {
       if (!await showConfirm('确定取消归档？')) return;
-      await fetchJSON('/admin/api/templates/'+id+'/unarchive', { method: 'POST' });
-      loadTemplates();
+      try {
+        await fetchJSON('/admin/api/templates/'+id+'/unarchive', { method: 'POST' });
+        loadTemplates();
+      } catch (e) { showToast('取消归档失败: ' + e.message, 'error'); }
     }
     async function tplDelete(id) {
       if (!await showConfirm('确定删除该模板？有关联任务时保留历史数据，无关联任务时同步清理存储文件。')) return;
@@ -1209,7 +1362,7 @@ export const adminPageHtml = `<!DOCTYPE html>
         if (result.error) throw new Error(result.message || '删除模板失败');
         await loadTemplates();
         await loadTestRender();
-      } catch(e) { alert(e.message); }
+      } catch(e) { showToast(e.message, 'error'); }
     }
     function openTemplateUpload() {
       document.getElementById('templateUploadName').value = '';
@@ -1221,12 +1374,19 @@ export const adminPageHtml = `<!DOCTYPE html>
     function closeTemplateUpload() {
       document.getElementById('templateUploadModal').classList.remove('open');
     }
+    let templateUploadXhr = null;
+    function cancelTemplateUpload() {
+      if (templateUploadXhr) templateUploadXhr.abort();
+    }
     async function submitTemplateUpload() {
       const name = document.getElementById('templateUploadName').value.trim();
       const file = document.getElementById('templateUploadFile').files[0];
       const psMinVersion = document.getElementById('templateUploadPsVersion').value.trim();
       const status = document.getElementById('templateUploadStatus');
       const button = document.getElementById('templateUploadSave');
+      const cancelButton = document.getElementById('templateUploadCancel');
+      const progressWrap = document.getElementById('templateUploadProgress');
+      const progressBar = document.getElementById('templateUploadProgressBar');
       if (!name || !file) { status.textContent = '请填写模板名称并选择 PSD 文件'; return; }
       if (!file.name.toLowerCase().endsWith('.psd')) { status.textContent = '仅支持 .psd 文件'; return; }
       // 前端 size 预检：避免大文件传完后才在后端被拒（须与后端 env.MAX_PSD_SIZE_MB 保持一致）
@@ -1237,16 +1397,33 @@ export const adminPageHtml = `<!DOCTYPE html>
         return;
       }
       button.disabled = true;
-      status.textContent = '上传并解析 PSD 中，请勿关闭页面...';
+      cancelButton.style.display = '';
+      progressWrap.style.display = '';
+      progressBar.style.width = '0%';
+      status.textContent = '上传中 0%（共 ' + (file.size / 1024 / 1024).toFixed(1) + 'MB）...';
       try {
-        const response = await fetch('/admin/api/templates/upload?fileName=' + encodeURIComponent(file.name) + '&name=' + encodeURIComponent(name) + '&psMinVersion=' + encodeURIComponent(psMinVersion), { method: 'POST', headers: { 'Content-Type': 'image/vnd.adobe.photoshop' }, body: file });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.message || '模板上传失败');
+        const result = await uploadWithProgress(
+          '/admin/api/templates/upload?fileName=' + encodeURIComponent(file.name) + '&name=' + encodeURIComponent(name) + '&psMinVersion=' + encodeURIComponent(psMinVersion),
+          file,
+          'image/vnd.adobe.photoshop',
+          (pct) => {
+            progressBar.style.width = pct + '%';
+            status.textContent = pct < 100
+              ? '上传中 ' + pct + '%（共 ' + (file.size / 1024 / 1024).toFixed(1) + 'MB）...'
+              : '上传完成，正在解析 PSD（最长约 3 分钟），请勿关闭页面...';
+          },
+          (xhr) => { templateUploadXhr = xhr; },
+        );
         status.textContent = '解析完成，模板已创建';
         await loadTemplates();
         closeTemplateUpload();
       } catch (e) { status.textContent = '上传失败: ' + e.message; }
-      finally { button.disabled = false; }
+      finally {
+        button.disabled = false;
+        cancelButton.style.display = 'none';
+        progressWrap.style.display = 'none';
+        templateUploadXhr = null;
+      }
     }
     async function fontToggle(id, publish) {
       // M9：后端权威校验许可证；前端仅处理错误提示
@@ -1257,17 +1434,19 @@ export const adminPageHtml = `<!DOCTYPE html>
           throw new Error(e.message || 'HTTP ' + r.status);
         }
         loadFonts();
-      } catch (e) { alert(e.message); }
+      } catch (e) { showToast(e.message, 'error'); }
     }
-    async function fontEditLicense(id, current) {
+    async function fontEditLicense(id) {
       licenseEditorFontId = id;
-      document.getElementById('licenseNoteInput').value = current || '';
+      // 当前备注从 fontsById 取（loadFonts 时构建），不再经内联 onclick 传参
+      document.getElementById('licenseNoteInput').value = (fontsById.get(id) || {}).licenseNote || '';
       document.getElementById('licenseEditorStatus').textContent = '';
       document.getElementById('licenseModal').classList.add('open');
       document.getElementById('licenseNoteInput').focus();
     }
-    async function fontDelete(id, familyName, postscriptName) {
-      const label = (familyName || '') + ' (' + (postscriptName || '') + ')';
+    async function fontDelete(id) {
+      const f = fontsById.get(id) || {};
+      const label = (f.familyName || '') + ' (' + (f.postscriptName || '') + ')';
       if (!await showConfirm('确定删除字体 ' + label + '？\\n此操作不可恢复：将同步卸载系统字体、清理对象存储文件、删除数据库记录。')) return;
       if (!await showConfirm('再次确认：彻底删除字体 ' + label + '？\\n若被图层绑定引用，删除将被拒绝。')) return;
       try {
@@ -1277,42 +1456,59 @@ export const adminPageHtml = `<!DOCTYPE html>
         else tip += '；系统字体未卸载（可能未安装或权限不足）';
         if (r.storagePurged) tip += '；存储文件已清理';
         else tip += '；存储文件未清理';
-        alert(tip);
+        showToast(tip, 'info');
         loadFonts();
-      } catch (e) { alert('删除失败: ' + e.message); }
+      } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
     }
 
-    // ===== 字体上传 =====
+    // ===== 字体上传（模态框表单，替代浏览器 prompt） =====
     function openFontUpload() {
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = '.ttf,.otf,.ttc';
-      input.onchange = async () => {
-        const file = input.files && input.files[0];
-        if (!file) return;
-        // 询问许可证备注（可选）
-        const licenseNote = prompt('请输入字体许可证备注（可选，留空跳过）：', '') || '';
-        try {
-          const buffer = await file.arrayBuffer();
-          const url = '/admin/api/fonts/upload?fileName=' + encodeURIComponent(file.name)
-            + (licenseNote.trim() ? '&licenseNote=' + encodeURIComponent(licenseNote.trim()) : '');
-          const r = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': file.type || 'font/otf' },
-            body: new Uint8Array(buffer),
-          });
-          const data = await r.json();
-          if (!r.ok) throw new Error(data.message || 'HTTP ' + r.status);
-          const installTip = data.installed
-            ? '，已安装到系统'
-            : '（安装失败：' + (data.installMessage || '未知原因') + '，Worker 同步时会重试）';
-          alert('字体上传成功：' + data.familyName + ' (' + data.postscriptName + ')' + installTip);
-          loadFonts();
-        } catch (e) {
-          alert('字体上传失败: ' + e.message);
-        }
-      };
-      input.click();
+      document.getElementById('fontUploadFile').value = '';
+      document.getElementById('fontUploadLicense').value = '';
+      document.getElementById('fontUploadStatus').textContent = '';
+      document.getElementById('fontUploadProgress').style.display = 'none';
+      document.getElementById('fontUploadSave').disabled = false;
+      document.getElementById('fontUploadModal').classList.add('open');
+    }
+    function closeFontUpload() {
+      document.getElementById('fontUploadModal').classList.remove('open');
+    }
+    let fontUploadXhr = null;
+    async function submitFontUpload() {
+      const file = document.getElementById('fontUploadFile').files[0];
+      const licenseNote = document.getElementById('fontUploadLicense').value.trim();
+      const status = document.getElementById('fontUploadStatus');
+      const button = document.getElementById('fontUploadSave');
+      const progressBar = document.getElementById('fontUploadProgressBar');
+      const progressWrap = document.getElementById('fontUploadProgress');
+      if (!file) { status.textContent = '请选择字体文件'; return; }
+      if (!/\\.(ttf|otf|ttc)$/i.test(file.name)) { status.textContent = '仅支持 .ttf / .otf / .ttc 文件'; return; }
+      button.disabled = true;
+      progressWrap.style.display = '';
+      progressBar.style.width = '0%';
+      status.textContent = '上传中 0%...';
+      try {
+        const url = '/admin/api/fonts/upload?fileName=' + encodeURIComponent(file.name)
+          + (licenseNote ? '&licenseNote=' + encodeURIComponent(licenseNote) : '');
+        const data = await uploadWithProgress(url, file, file.type || 'font/otf',
+          (pct) => {
+            progressBar.style.width = pct + '%';
+            status.textContent = '上传中 ' + pct + '%...';
+          },
+          (xhr) => { fontUploadXhr = xhr; });
+        const installTip = data.installed
+          ? '，已安装到系统'
+          : '（安装失败：' + (data.installMessage || '未知原因') + '，Worker 同步时会重试）';
+        closeFontUpload();
+        showToast('字体上传成功：' + data.familyName + ' (' + data.postscriptName + ')' + installTip, 'success');
+        loadFonts();
+      } catch (e) {
+        status.textContent = '上传失败: ' + e.message;
+      } finally {
+        button.disabled = false;
+        progressWrap.style.display = 'none';
+        fontUploadXhr = null;
+      }
     }
 
     let licenseEditorFontId = null;
@@ -1366,15 +1562,15 @@ export const adminPageHtml = `<!DOCTYPE html>
       try {
         await fetch('/admin/api/alerts/' + id + '/ack', { method: 'POST' });
         await loadAlerts();
-      } catch (e) { alert('确认失败: ' + e.message); }
+      } catch (e) { showToast('确认失败: ' + e.message, 'error'); }
     }
     async function batchClearAlerts() {
       if (!await showConfirm('确定清除所有告警日志？此操作不可恢复。')) return;
       try {
         const r = await fetchJSON('/admin/api/alerts/batch-clear', { method: 'POST' });
-        alert('已清除 '+r.deleted+' 条告警日志');
+        showToast('已清除 '+r.deleted+' 条告警日志', 'success');
         await loadAlerts();
-      } catch (e) { alert('清除失败: ' + e.message); }
+      } catch (e) { showToast('清除失败: ' + e.message, 'error'); }
     }
 
     // ===== Webhook 投递日志（M6） =====
@@ -1414,7 +1610,7 @@ export const adminPageHtml = `<!DOCTYPE html>
           throw new Error(e.message || 'HTTP ' + r.status);
         }
         await loadWebhookLogs();
-      } catch (e) { alert('重试失败: ' + e.message); }
+      } catch (e) { showToast('重试失败: ' + e.message, 'error'); }
     }
 
     // ===== M5：图层绑定配置编辑器 =====
@@ -1438,24 +1634,24 @@ export const adminPageHtml = `<!DOCTYPE html>
       return out;
     }
 
-    async function openBindingEditor(templateId, templateName) {
+    async function openBindingEditor(templateId) {
       try {
         const detail = await fetchJSON('/admin/api/templates/' + templateId);
         if (!detail || !detail.latestVersion) {
-          alert('模板无版本数据，无法编辑绑定');
+          showToast('模板无版本数据，无法编辑绑定', 'error');
           return;
         }
         if (detail.latestVersion.published) {
-          alert('已发布版本不可修改绑定');
+          showToast('已发布版本不可修改绑定', 'error');
           return;
         }
         const v = detail.latestVersion;
         if (!v.layerTree || !v.layerTree.length) {
-          alert('图层树为空，无法编辑绑定');
+          showToast('图层树为空，无法编辑绑定', 'error');
           return;
         }
         bindingState.templateId = templateId;
-        bindingState.templateName = templateName || detail.name;
+        bindingState.templateName = detail.name || templateId;
         bindingState.versionInfo = v;
         bindingState.layerTree = v.layerTree;
         bindingState.flatLayers = flattenLayers(v.layerTree, []);
@@ -1481,7 +1677,7 @@ export const adminPageHtml = `<!DOCTYPE html>
         updateBindingSummary();
         document.getElementById('bindingModal').classList.add('open');
       } catch (e) {
-        alert('加载模板详情失败: ' + e.message);
+        showToast('加载模板详情失败: ' + e.message, 'error');
       }
     }
 
@@ -1619,7 +1815,7 @@ export const adminPageHtml = `<!DOCTYPE html>
       if (!layer) return;
       // 防御：仅 smartObject/text/pixel 允许启用绑定
       if (enabled && layer.type !== 'smartObject' && layer.type !== 'text' && layer.type !== 'pixel') {
-        alert('该图层类型不支持绑定替换（仅智能对象、文字和像素图层可绑定）');
+        showToast('该图层类型不支持绑定替换（仅智能对象、文字和像素图层可绑定）', 'error');
         document.getElementById('bindEnabled').checked = false;
         return;
       }
@@ -1670,11 +1866,11 @@ export const adminPageHtml = `<!DOCTYPE html>
       const ids = new Set();
       for (const b of bindings) {
         if (!b.bindingId || !b.bindingId.trim()) {
-          alert('图层 ' + b.layerId + ' 的 bindingId 不能为空');
+          showToast('图层 ' + b.layerId + ' 的 bindingId 不能为空', 'info');
           return;
         }
         if (ids.has(b.bindingId)) {
-          alert('bindingId 重复: ' + b.bindingId);
+          showToast('bindingId 重复: ' + b.bindingId, 'error');
           return;
         }
         ids.add(b.bindingId);
@@ -1688,11 +1884,11 @@ export const adminPageHtml = `<!DOCTYPE html>
         });
         const data = await r.json();
         if (!r.ok) throw new Error(data.message || 'HTTP ' + r.status);
-        alert('保存成功（' + (data.bindingCount || bindings.length) + ' 项绑定）');
+        showToast('保存成功（' + (data.bindingCount || bindings.length) + ' 项绑定）', 'success');
         closeBindingEditor();
         loadTemplates();
       } catch (e) {
-        alert('保存失败: ' + e.message);
+        showToast('保存失败: ' + e.message, 'error');
       }
     }
 
@@ -1821,18 +2017,41 @@ export const adminPageHtml = `<!DOCTYPE html>
       try {
         await fetchJSON('/admin/api/bootstrap-tokens/' + id, { method: 'DELETE' });
         loadBootstrapTokens();
-      } catch (e) { alert('作废失败: ' + (e.message || '未知错误')); }
+      } catch (e) { showToast('作废失败: ' + (e.message || '未知错误'), 'error'); }
     }
     async function bootstrapTokenDelete(id) {
       if (!await showConfirm('确定删除该授权码记录？此操作不可恢复。')) return;
       try {
         await fetchJSON('/admin/api/bootstrap-tokens/' + id + '/delete', { method: 'POST' });
         loadBootstrapTokens();
-      } catch (e) { alert('删除失败: ' + (e.message || '未知错误')); }
+      } catch (e) { showToast('删除失败: ' + (e.message || '未知错误'), 'error'); }
     }
 
+    // 分块容错加载：单个区块接口失败时在对应容器内显示错误，
+    // 而不是让该区块永远停在「加载中...」且每 5 秒累积一次未处理拒绝
+    async function safeLoad(fn, containerId) {
+      try {
+        await fn();
+      } catch (e) {
+        const el = document.getElementById(containerId);
+        if (el) el.innerHTML = '<tr><td class="empty" style="color:#e57373;font-style:normal">加载失败: ' + escapeHtml(e.message || '未知错误') + '</td></tr>';
+        console.error('区块加载失败: ' + containerId, e);
+      }
+    }
     async function loadAll() {
-      await Promise.all([loadStats(), loadAlerts(), loadWorkers(), loadStorageSettings(), loadJobs(), loadTemplates(), loadFonts(), loadApiKeys(), loadWebhookLogs(), loadTestRender(), loadBootstrapTokens()]);
+      await Promise.all([
+        safeLoad(loadStats, 'stats'),
+        safeLoad(loadAlerts, 'alerts'),
+        safeLoad(loadWorkers, 'workers'),
+        safeLoad(loadStorageSettings, 'storageSettings'),
+        safeLoad(loadJobs, 'jobs'),
+        safeLoad(loadTemplates, 'templates'),
+        safeLoad(loadFonts, 'fonts'),
+        safeLoad(loadApiKeys, 'apiKeys'),
+        safeLoad(loadWebhookLogs, 'webhookLogs'),
+        safeLoad(loadTestRender, 'testRender'),
+        safeLoad(loadBootstrapTokens, 'bootstrapTokens'),
+      ]);
     }
     loadMe();
     loadAll();

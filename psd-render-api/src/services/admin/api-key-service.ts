@@ -23,7 +23,7 @@ import { prisma } from '../../lib/prisma.js';
 import { logger } from '../../lib/logger.js';
 import { genApiKeyPlainText } from '../../lib/crypto.js';
 import { Errors } from '../../lib/errors.js';
-import { encryptSecretWithInfo } from '../../lib/secret-crypto.js';
+import { decryptSecretWithInfo, encryptSecretWithInfo } from '../../lib/secret-crypto.js';
 import { env, isProd } from '../../config/env.js';
 
 /**
@@ -220,6 +220,8 @@ class ApiKeyService {
       data: {
         keyPrefix,
         keyHash,
+        // 可逆加密副本：供管理后台随时「查看」明文（鉴权仍走 keyHash）
+        keyEncrypted: encryptSecretWithInfo(plaintext, 'api_key'),
         name: input.name,
         tenantId,
         active: true,
@@ -265,54 +267,23 @@ class ApiKeyService {
   }
 
   /**
-   * 轮换 API Key
-   * - 旧 key 标记为 active=false + disabledAt=now
-   * - 生成新 key（同名同租户同配置），返回明文
-   * - 旧 key 仍可在历史审计中查询
+   * 查看密钥明文（替代已移除的「轮换」）
+   * - 从可逆加密副本解密返回；存量旧密钥（keyEncrypted 为空）无法补出明文，
+   *   提示删除重建。
    */
-  async rotate(id: string, operator: string): Promise<ApiKeyCreateResult> {
-    const old = await prisma.apiKey.findUnique({ where: { id } });
-    if (!old) throw Errors.notFound('API Key 不存在');
-
-    const plaintext = genApiKeyPlainText();
-    validateKeyFormat(plaintext);
-    const keyPrefix = extractKeyPrefix(plaintext);
-    const keyHash = await bcrypt.hash(plaintext, BCRYPT_ROUNDS);
-
-    // 事务：禁用旧 key + 创建新 key
-    const [_, created] = await prisma.$transaction([
-      prisma.apiKey.update({
-        where: { id },
-        data: { active: false, disabledAt: new Date() },
-      }),
-      prisma.apiKey.create({
-        data: {
-          keyPrefix,
-          keyHash,
-          name: old.name,
-          tenantId: old.tenantId,
-          active: true,
-          priority: old.priority,
-          rateLimitPerMin: old.rateLimitPerMin,
-          quotaPerDay: old.quotaPerDay,
-          quotaUsedDay: 0,
-          quotaResetAt: old.quotaPerDay ? new Date(Date.now() + 24 * 3600 * 1000) : null,
-          scopes: old.scopes,
-          webhookUrlDefault: old.webhookUrlDefault,
-          webhookSecret: old.webhookSecret,
-          ipWhitelist: old.ipWhitelist,
-        },
-      }),
-    ]);
-
+  async revealPlaintext(id: string, operator: string): Promise<{ plaintextKey: string }> {
+    const k = await prisma.apiKey.findUnique({ where: { id } });
+    if (!k) throw Errors.notFound('API Key 不存在');
+    if (!k.keyEncrypted) {
+      throw Errors.validationError('该密钥创建于旧版本，未保存可查看副本；请删除后重新创建');
+    }
+    const plaintextKey = decryptSecretWithInfo(k.keyEncrypted, 'api_key');
     logger.info({
-      oldApiKeyId: id,
-      newApiKeyId: created.id,
-      name: created.name,
+      apiKeyId: id,
       operator,
-      msg: 'API Key 已轮换',
+      msg: 'API Key 明文已查看',
     });
-    return { apiKey: toPublic(created), plaintextKey: plaintext };
+    return { plaintextKey };
   }
 
   /** 禁用 API Key */

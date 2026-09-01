@@ -5,6 +5,7 @@
  * GET /internal/fonts           字体列表（供 Admin UI）
  */
 import { FastifyInstance } from 'fastify';
+import { z } from 'zod';
 import { fontService } from '../../services/font/font-service.js';
 
 export async function fontInternalRoutes(app: FastifyInstance) {
@@ -157,21 +158,24 @@ export async function fontInternalRoutes(app: FastifyInstance) {
       },
     },
   }, async (req, reply) => {
-    const body = (req.body ?? {}) as any;
-    if (!body.objectKey || !body.postscriptName || !body.familyName) {
+    // P2-37 修复：使用 zod 严格校验类型与长度，防止畸形字段写入 DB
+    const registerSchema = z.object({
+      objectKey: z.string().min(1).max(512),
+      postscriptName: z.string().min(1).max(255),
+      familyName: z.string().min(1).max(255),
+      style: z.string().max(100).optional(),
+      sha256: z.string().length(64).optional(),
+      licenseNote: z.string().max(500).optional(),
+    });
+    const parsed = registerSchema.safeParse(req.body);
+    if (!parsed.success) {
       return reply.code(400).send({
         error: 'VALIDATION_ERROR',
-        message: '缺少 objectKey/postscriptName/familyName',
+        message: '参数校验失败',
+        details: parsed.error.issues,
       });
     }
-    const font = await fontService.register({
-      objectKey: body.objectKey,
-      familyName: body.familyName,
-      postscriptName: body.postscriptName,
-      style: body.style,
-      sha256: body.sha256,
-      licenseNote: body.licenseNote,
-    });
+    const font = await fontService.register(parsed.data);
     return reply.send({ fontId: font.id, code: font.code });
   });
 }

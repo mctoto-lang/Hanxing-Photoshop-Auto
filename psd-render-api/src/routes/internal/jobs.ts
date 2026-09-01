@@ -148,7 +148,7 @@ export async function jobInternalRoutes(app: FastifyInstance) {
     schema: {
       tags: ['internal-jobs'],
       summary: '上报任务失败',
-      description: 'Worker 上报任务失败，含错误码（PHOTOSHOP_SCRIPT_ERROR / TEMPLATE_LAYER_NOT_FOUND / FONT_UNAVAILABLE / INVALID_INPUT_ASSET / WORKER_LOST / JOB_CANCELLED）与错误信息。',
+      description: 'Worker 上报任务失败，含错误码（PHOTOSHOP_SCRIPT_ERROR / TEMPLATE_LAYER_NOT_FOUND / FONT_UNAVAILABLE / INVALID_INPUT_ASSET / WORKER_LOST / JOB_CANCELLED / INVALID_LAYER_BINDING / LEASE_LOST / COMPLETE_REPORT_FAILED）与错误信息。',
       security: [{ workerToken: [] }],
       params: {
         type: 'object',
@@ -161,7 +161,7 @@ export async function jobInternalRoutes(app: FastifyInstance) {
           leaseToken: { type: 'string', description: '租约令牌' },
           errorCode: {
             type: 'string',
-            enum: ['PHOTOSHOP_SCRIPT_ERROR', 'TEMPLATE_LAYER_NOT_FOUND', 'FONT_UNAVAILABLE', 'INVALID_INPUT_ASSET', 'WORKER_LOST', 'JOB_CANCELLED'],
+            enum: ['PHOTOSHOP_SCRIPT_ERROR', 'TEMPLATE_LAYER_NOT_FOUND', 'FONT_UNAVAILABLE', 'INVALID_INPUT_ASSET', 'WORKER_LOST', 'JOB_CANCELLED', 'INVALID_LAYER_BINDING', 'LEASE_LOST', 'COMPLETE_REPORT_FAILED'],
             description: '错误码',
           },
           errorMessage: { type: 'string', description: '错误详情' },

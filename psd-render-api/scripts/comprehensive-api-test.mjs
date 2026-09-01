@@ -158,7 +158,7 @@ async function testAdminAuth() {
     `status=${r.status}`, r.body);
 
   // 正确登录
-  r = await req('POST', '/admin/api/login', { json: { username: 'admin', password: 'DevAdmin!Secure2026' } });
+  r = await req('POST', '/admin/api/login', { json: { username: 'admin', password: process.env.ADMIN_PASS ?? 'ChangeMe!Secure2026' } });
   state.adminCookie = extractCookie(r.headers['set-cookie'], 'admin_session');
   state.adminToken = state.adminCookie;
   record('登录 - 正确凭据返回 200', r.status === 200 && r.body?.ok && state.adminCookie,

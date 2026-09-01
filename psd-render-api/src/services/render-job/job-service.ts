@@ -22,6 +22,8 @@ import { webhookService } from '../webhook/webhook-service.js';
 export interface CreateJobParams {
   tenantId: string;
   apiKeyId?: string;
+  /** 终端用户（X-User-Id / X-User-Admin 透传）：私有模板渲染权限校验用 */
+  viewer?: { userId?: string; userAdmin: boolean };
   idempotencyKey: string;
   templateVersionId: string;
   input: RenderJobInput;
@@ -93,6 +95,12 @@ class RenderJobService {
     if (!tv) throw Errors.templateNotPublished('模板版本不存在');
     if (tv.template.tenantId !== params.tenantId) throw Errors.templateNotPublished('模板版本不存在');
     if (!tv.published) throw Errors.templateNotPublished('模板版本未发布，无法提交渲染');
+    // 非公开模板：仅归属人本人或企业管理员可提交渲染
+    if (tv.template.visibility === 'private') {
+      const v = params.viewer;
+      const allowed = v?.userAdmin === true || (v?.userId != null && v.userId === tv.template.ownerUserId);
+      if (!allowed) throw Errors.forbidden('非公开模板仅归属人或企业管理员可渲染');
+    }
 
     if (params.targetWorkerId) {
       const worker = await prisma.worker.findUnique({ where: { id: params.targetWorkerId } });
@@ -293,7 +301,10 @@ class RenderJobService {
     if (job.tenantId !== tenantId) return null;
 
     // 成功任务：生成结果下载地址（3 天有效）
+    // resultToken：local 存储模式的签名下载令牌（Authorization: Bearer 携带）；
+    // COS 模式为 null（签名已嵌入 resultUrl）
     let resultUrl: string | undefined;
+    let resultToken: string | null = null;
     if (job.status === 'SUCCEEDED') {
       const outputArtifact = job.artifacts.find((a) => a.kind === 'output');
       if (outputArtifact) {
@@ -304,6 +315,7 @@ class RenderJobService {
           expiresInSec: ttl,
         });
         resultUrl = dl.downloadUrl;
+        resultToken = dl.downloadToken || null;
       }
     }
 
@@ -321,6 +333,7 @@ class RenderJobService {
         version: job.templateVersion.version,
       },
       resultUrl,
+      resultToken,
       resultExpiresAt: job.artifacts.find((a) => a.kind === 'output')?.expiresAt ?? null,
       createdAt: job.createdAt,
       updatedAt: job.updatedAt,

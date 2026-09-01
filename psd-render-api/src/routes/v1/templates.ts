@@ -10,7 +10,11 @@
  */
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { templateService } from '../../services/template/template-service.js';
+import {
+  templateService,
+  templateViewerFrom,
+} from '../../services/template/template-service.js';
+import { getStorage } from '../../services/storage/index.js';
 import { env } from '../../config/env.js';
 import type { LayerSchema } from '../../types/index.js';
 
@@ -52,14 +56,20 @@ export async function templateRoutes(app: FastifyInstance) {
       },
     },
   }, async (req, reply) => {
-    const body = (req.body ?? {}) as any;
-    const fileName = body.fileName;
-    if (!fileName || typeof fileName !== 'string') {
-      return reply.code(400).send({ error: 'VALIDATION_ERROR', message: '缺少 fileName' });
+    // P2-36 修复：使用 zod 严格校验 fileName（长度、字符集），防止路径遍历
+    const uploadUrlSchema = z.object({
+      fileName: z.string().min(1).max(255).regex(/^[^<>:"|?*\\/\u0000]+$/, '文件名含非法字符'),
+      mimeType: z.string().optional(),
+      sizeBytes: z.number().int().positive().max(300 * 1024 * 1024).optional(),
+    });
+    const parsed = uploadUrlSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'VALIDATION_ERROR', message: '参数校验失败', details: parsed.error.issues });
     }
+    const { fileName, mimeType, sizeBytes } = parsed.data;
     const result = await templateService.getUploadUrl({
       fileName,
-      mimeType: body.mimeType,
+      mimeType,
       tenantId: req.user?.tenantId,
     });
     return reply.send(result);
@@ -70,6 +80,7 @@ export async function templateRoutes(app: FastifyInstance) {
     objectKey: z.string().min(1),
     name: z.string().min(1),
     psMinVersion: z.string().optional(),
+    visibility: z.enum(['public', 'private']).optional(),
   });
 
   app.post('/v1/templates', {
@@ -86,6 +97,7 @@ export async function templateRoutes(app: FastifyInstance) {
           objectKey: { type: 'string', minLength: 1, description: '上传 PSD 后获得的 objectKey' },
           name: { type: 'string', minLength: 1, description: '模板名称' },
           psMinVersion: { type: 'string', description: '可选，最低 PS 版本要求，默认 25.0' },
+          visibility: { type: 'string', enum: ['public', 'private'], description: '可见性：public=企业内可见（默认）/ private=仅归属人、企业管理员、平台超管' },
         },
       },
       // P0 修复（严重5）：补齐缺失的 response schema
@@ -135,7 +147,12 @@ export async function templateRoutes(app: FastifyInstance) {
     if (!tenantId) {
       return reply.code(401).send({ error: 'UNAUTHORIZED', message: 'API Key 缺少 tenantId' });
     }
-    const result = await templateService.createFromPsd({ ...parsed.data, tenantId });
+    const result = await templateService.createFromPsd({
+      ...parsed.data,
+      tenantId,
+      ownerUserId: req.user?.userId,
+      visibility: parsed.data.visibility,
+    });
     return reply.send(result);
   });
 
@@ -228,7 +245,12 @@ export async function templateRoutes(app: FastifyInstance) {
     if (!tenantId) {
       return reply.code(401).send({ error: 'UNAUTHORIZED', message: 'API Key 缺少 tenantId' });
     }
-    await templateService.saveLayerBindings(templateId, parsed.data as LayerSchema, tenantId);
+    await templateService.saveLayerBindings(
+      templateId,
+      parsed.data as LayerSchema,
+      tenantId,
+      templateViewerFrom(req.user),
+    );
     return reply.send({ ok: true, templateId });
   });
 
@@ -271,7 +293,7 @@ export async function templateRoutes(app: FastifyInstance) {
     if (!tenantId) {
       return reply.code(401).send({ error: 'UNAUTHORIZED', message: 'API Key 缺少 tenantId' });
     }
-    await templateService.publish(templateId, tenantId);
+    await templateService.publish(templateId, tenantId, templateViewerFrom(req.user));
     return reply.send({ ok: true, templateId });
   });
 
@@ -302,6 +324,8 @@ export async function templateRoutes(app: FastifyInstance) {
                   latestVersion: { type: 'integer', description: '最新版本号（从 1 起，无版本时为 0）' },
                   published: { type: 'boolean', description: '最新版本是否已发布' },
                   thumbnailObjectKey: { type: 'string', nullable: true, description: '缩略图对象 key（无缩略图时为 null）' },
+                  ownerUserId: { type: 'string', nullable: true, description: '归属用户（X-User-Id 透传；null=平台共享）' },
+                  visibility: { type: 'string', enum: ['public', 'private'], description: '可见性：public=企业内 / private=仅归属人、企业管理员、平台超管' },
                   createdAt: { type: 'string', format: 'date-time', description: '模板创建时间' },
                 },
               },
@@ -319,7 +343,7 @@ export async function templateRoutes(app: FastifyInstance) {
     if (!tenantId) {
       return reply.code(401).send({ error: 'UNAUTHORIZED', message: 'API Key 缺少 tenantId' });
     }
-    const list = await templateService.list(tenantId);
+    const list = await templateService.list(tenantId, templateViewerFrom(req.user));
     return reply.send({ templates: list });
   });
 
@@ -351,6 +375,8 @@ export async function templateRoutes(app: FastifyInstance) {
             code: { type: 'string', description: '模板编码' },
             name: { type: 'string', description: '模板名称' },
             status: { type: 'string', description: '模板状态（DRAFT / PUBLISHED / REPUBLISH_REQUIRED / ARCHIVED / DELETED 等）' },
+            ownerUserId: { type: 'string', nullable: true, description: '归属用户（null=平台共享）' },
+            visibility: { type: 'string', enum: ['public', 'private'], description: '可见性' },
             latestVersion: {
               type: 'object',
               nullable: true,
@@ -397,10 +423,105 @@ export async function templateRoutes(app: FastifyInstance) {
     if (!tenantId) {
       return reply.code(401).send({ error: 'UNAUTHORIZED', message: 'API Key 缺少 tenantId' });
     }
-    const detail = await templateService.getDetail(templateId, tenantId);
+    const detail = await templateService.getDetail(templateId, tenantId, templateViewerFrom(req.user));
     if (!detail) {
-      return reply.code(404).send({ error: 'NOT_FOUND', message: '模板不存在' });
+      return reply.code(404).send({ error: 'NOT_FOUND', message: '模板不存在或无权访问' });
     }
     return reply.send(detail);
+  });
+
+  // 模板缩略图（供外部调用方（如瀚星 Super Image 网页端）展示模板预览）
+  // Bearer API Key 鉴权，返回最新版本的缩略图二进制；无缩略图 404（调用方降级占位）
+  app.get('/v1/templates/:id/thumbnail', {
+    preHandler: [app.authenticateApiKey],
+    schema: {
+      tags: ['templates'],
+      summary: '获取模板缩略图',
+      description: '返回模板最新版本缩略图的二进制流（image/png 或 image/jpeg）。模板无缩略图或不存在时返回 404，调用方应降级为占位展示。',
+      security: [{ apiKey: [] }],
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: {
+          id: { type: 'string', description: '模板 ID（tpl_xxx）' },
+        },
+      },
+      response: {
+        200: {
+          type: 'string',
+          format: 'binary',
+          description: '缩略图二进制流',
+        },
+        401: { $ref: 'ErrorResponse#', description: 'API Key 无效或缺少 tenantId' },
+        403: { $ref: 'ErrorResponse#', description: 'IP 白名单拒绝 / 作用域不足' },
+        404: { $ref: 'ErrorResponse#', description: '模板不存在或无缩略图' },
+        429: { $ref: 'ErrorResponse#', description: '触发限流或日配额耗尽' },
+      },
+    },
+  }, async (req, reply) => {
+    const templateId = (req.params as any).id as string;
+    const tenantId = req.user?.tenantId;
+    if (!tenantId) {
+      return reply.code(401).send({ error: 'UNAUTHORIZED', message: 'API Key 缺少 tenantId' });
+    }
+    const detail = await templateService.getDetail(templateId, tenantId, templateViewerFrom(req.user));
+    const objectKey = detail?.latestVersion?.thumbnailObjectKey;
+    if (!detail || !objectKey) {
+      return reply.code(404).send({ error: 'NOT_FOUND', message: '模板不存在或无缩略图' });
+    }
+    const storage = await getStorage();
+    let buf: Buffer;
+    try {
+      buf = await storage.getObject(objectKey);
+    } catch {
+      return reply.code(404).send({ error: 'NOT_FOUND', message: '缩略图对象不存在' });
+    }
+    const mime = /\.(jpe?g)$/i.test(objectKey) ? 'image/jpeg' : 'image/png';
+    reply.header('Content-Type', mime);
+    reply.header('Cache-Control', 'private, max-age=600');
+    return reply.send(buf);
+  });
+
+  // 重新生成缩略图（解析时未生成成功的情况下由外部调用方手动补生成）
+  app.post('/v1/templates/:id/regenerate-thumbnail', {
+    preHandler: [app.authenticateApiKey],
+    schema: {
+      tags: ['templates'],
+      summary: '重新生成模板缩略图',
+      description: '基于最新版本的 PSD 重新生成缩略图。私有模板仅归属人/企业管理员可调用（X-User-Id / X-User-Admin）。',
+      security: [{ apiKey: [] }],
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: { id: { type: 'string', description: '模板 ID' } },
+      },
+      response: {
+        200: {
+          type: 'object',
+          required: ['ok', 'thumbnailObjectKey'],
+          properties: {
+            ok: { type: 'boolean' },
+            thumbnailObjectKey: { type: 'string' },
+          },
+        },
+        400: { $ref: 'ErrorResponse#' },
+        401: { $ref: 'ErrorResponse#' },
+        403: { $ref: 'ErrorResponse#', description: '非公开模板无权操作' },
+        404: { $ref: 'ErrorResponse#' },
+        429: { $ref: 'ErrorResponse#' },
+      },
+    },
+  }, async (req, reply) => {
+    const templateId = (req.params as any).id as string;
+    const tenantId = req.user?.tenantId;
+    if (!tenantId) {
+      return reply.code(401).send({ error: 'UNAUTHORIZED', message: 'API Key 缺少 tenantId' });
+    }
+    const result = await templateService.regenerateThumbnail(
+      templateId,
+      tenantId,
+      templateViewerFrom(req.user),
+    );
+    return reply.send(result);
   });
 }

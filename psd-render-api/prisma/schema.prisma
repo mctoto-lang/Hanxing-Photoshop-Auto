@@ -27,6 +27,9 @@ model ApiKey {
   id                String      @id @default(cuid())
   keyPrefix         String      @unique
   keyHash           String      @unique
+  // 可逆加密的密钥副本（AES-256-GCM，info=api_key）：供管理后台「查看」随时取回明文；
+  // 鉴权仍走 keyHash（bcrypt）。存量旧密钥该列为空，无法查看（需删除重建）。
+  keyEncrypted      String?
   name              String
   tenantId          String      @default("default")
   active            Boolean     @default(true)
@@ -62,6 +65,10 @@ model Template {
   //   新字段默认 "default" 兼容历史数据；新建时按 API Key 的 tenantId 写入，
   //   外部 API 查询/更新时按 tenantId 过滤；Admin 跨租户管理不受影响。
   tenantId  String            @default("default")
+  // 归属用户（网页端经 X-User-Id 透传的操作者；Admin 上传为 null）
+  ownerUserId String?
+  // 可见性：public=企业内可见可渲染 / private=仅归属人、企业管理员（X-User-Admin）、平台超管
+  visibility String            @default("public")
   versions  TemplateVersion[]
   bindings  LayerBinding[]
   createdAt DateTime          @default(now())

@@ -19,6 +19,16 @@ import { AppError, Errors } from '../../lib/errors.js';
 import type { LayerSchema, LayerTreeResult, LayerNode } from '../../types/index.js';
 import { getTemplateDisplayStatus } from './template-status.js';
 
+/** 终端用户视图者（X-User-Id / X-User-Admin 透传）；未传返回 undefined（平台视角） */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function templateViewerFrom(user: any): { userId?: string; userAdmin: boolean } | undefined {
+  if (!user || typeof user !== 'object') return undefined;
+  const uid = typeof user.userId === 'string' && user.userId ? user.userId : undefined;
+  const admin = user.userAdmin === true;
+  if (!uid && !admin) return undefined;
+  return { userId: uid, userAdmin: admin };
+}
+
 class TemplateService {
   /**
    * 生成 PSD 上传预签名地址
@@ -53,6 +63,41 @@ class TemplateService {
       uploadToken: result.uploadToken,
       expiresAt: result.expiresAt,
     };
+  }
+
+  /**
+   * 可见性过滤片段：
+   *   public → 企业内（tenantId）可见；
+   *   private → 仅归属人本人（ownerUserId=userId）或企业管理员（userAdmin）可见。
+   * 平台 Admin 路径（tenantId 未传）不过滤。
+   */
+  private visibilityFilter(
+    tenantId: string | undefined,
+    viewer?: { userId?: string; userAdmin: boolean },
+  ): Record<string, unknown> {
+    if (!tenantId) return {};
+    if (viewer?.userAdmin) return { tenantId };
+    if (viewer?.userId) {
+      return { AND: [{ tenantId }, { OR: [{ visibility: 'public' }, { ownerUserId: viewer.userId }] }] };
+    }
+    // 无用户上下文的企业调用：仅公开模板
+    return { AND: [{ tenantId }, { visibility: 'public' }] };
+  }
+
+  /**
+   * 私有模板操作权（编辑绑定/发布/重生成缩略图）：归属人本人或企业管理员；
+   * 平台 Admin 路径（tenantId 未传）放行。
+   */
+  private assertTemplateEditable(
+    template: { visibility: string; ownerUserId: string | null },
+    tenantId: string | undefined,
+    viewer?: { userId?: string; userAdmin: boolean },
+  ): void {
+    if (!tenantId) return; // 平台超管
+    if (template.visibility !== 'private') return;
+    if (viewer?.userAdmin) return;
+    if (viewer?.userId && template.ownerUserId === viewer.userId) return;
+    throw Errors.forbidden('非公开模板仅归属人或企业管理员可操作');
   }
 
   async createFromUpload(opts: { fileName: string; name: string; body: Buffer; psMinVersion?: string; tenantId?: string }) {
@@ -99,6 +144,10 @@ class TemplateService {
     name: string;
     psMinVersion?: string;
     tenantId: string;
+    /** 归属用户（网页端透传的操作者）；缺省为平台共享（null） */
+    ownerUserId?: string;
+    /** public=企业内可见 / private=仅归属人、企业管理员、平台超管 */
+    visibility?: 'public' | 'private';
   }): Promise<LayerTreeResult> {
     // P0 安全修复（严重 S3）：objectKey 必须为 psd/ 前缀，防止读取其他资源类型对象
     if (!opts.objectKey.startsWith('psd/') || opts.objectKey.includes('..')) {
@@ -135,6 +184,8 @@ class TemplateService {
           name: opts.name,
           status: 'DRAFT',
           tenantId: opts.tenantId,
+          ownerUserId: opts.ownerUserId ?? null,
+          visibility: opts.visibility === 'private' ? 'private' : 'public',
         },
       });
       createdTemplateId = template.id;
@@ -276,12 +327,18 @@ class TemplateService {
    *   修复：若该版本曾发布过（template.status === 'REPUBLISH_REQUIRED' 且 !latestVersion.published），
    *   创建新版本写入新 layerSchema，旧版本保持不变。
    */
-  async saveLayerBindings(templateId: string, schema: LayerSchema, tenantId?: string) {
+  async saveLayerBindings(
+    templateId: string,
+    schema: LayerSchema,
+    tenantId?: string,
+    viewer?: { userId?: string; userAdmin: boolean },
+  ) {
     const template = await prisma.template.findFirst({
-      where: tenantId ? { id: templateId, tenantId } : { id: templateId },
+      where: { id: templateId, ...this.visibilityFilter(tenantId, viewer) },
       include: { versions: { orderBy: { version: 'desc' }, take: 1 } },
     });
-    if (!template) throw Errors.invalidLayerBinding('模板不存在');
+    if (!template) throw Errors.invalidLayerBinding('模板不存在或无权访问');
+    this.assertTemplateEditable(template, tenantId, viewer);
 
     const latestVersion = template.versions[0];
     if (!latestVersion) throw Errors.invalidLayerBinding('模板无版本');
@@ -402,12 +459,17 @@ class TemplateService {
    *
    * P0 安全修复（严重 S2）：外部 API 调用必须传 tenantId，Admin 跨租户管理可不传
    */
-  async publish(templateId: string, tenantId?: string) {
+  async publish(
+    templateId: string,
+    tenantId?: string,
+    viewer?: { userId?: string; userAdmin: boolean },
+  ) {
     const template = await prisma.template.findFirst({
-      where: tenantId ? { id: templateId, tenantId } : { id: templateId },
+      where: { id: templateId, ...this.visibilityFilter(tenantId, viewer) },
       include: { versions: { orderBy: { version: 'desc' }, take: 1 }, bindings: true },
     });
-    if (!template) throw Errors.invalidLayerBinding('模板不存在');
+    if (!template) throw Errors.invalidLayerBinding('模板不存在或无权访问');
+    this.assertTemplateEditable(template, tenantId, viewer);
 
     const latest = template.versions[0];
     if (!latest) throw Errors.invalidLayerBinding('模板无版本');
@@ -437,9 +499,13 @@ class TemplateService {
    *
    * P0 安全修复（严重 S2）：外部 API 调用必须传 tenantId，Admin 跨租户管理可不传
    */
-  async getDetail(templateId: string, tenantId?: string) {
+  async getDetail(
+    templateId: string,
+    tenantId?: string,
+    viewer?: { userId?: string; userAdmin: boolean },
+  ) {
     const template = await prisma.template.findFirst({
-      where: tenantId ? { id: templateId, tenantId } : { id: templateId },
+      where: { id: templateId, ...this.visibilityFilter(tenantId, viewer) },
       include: {
         versions: { orderBy: { version: 'desc' } },
         bindings: true,
@@ -453,6 +519,8 @@ class TemplateService {
       code: template.code,
       name: template.name,
       status: template.status,
+      ownerUserId: template.ownerUserId ?? null,
+      visibility: template.visibility === 'private' ? 'private' : 'public',
       latestVersion: latest
         ? {
             versionId: latest.id,
@@ -472,10 +540,17 @@ class TemplateService {
   /**
    * P0 安全修复（严重 S2）：外部 API 调用必须传 tenantId，Admin 跨租户管理可不传
    */
-  async list(tenantId?: string) {
+  async list(
+    tenantId?: string,
+    viewer?: { userId?: string; userAdmin: boolean },
+  ) {
     const templates = await prisma.template.findMany({
-      // 过滤掉软删除的模板，与 Admin 列表行为保持一致
-      where: tenantId ? { tenantId, NOT: { status: 'DELETED' } } : { NOT: { status: 'DELETED' } },
+      // 过滤掉软删除的模板，与 Admin 列表行为保持一致；
+      // 叠加可见性过滤（public=企业内 / private=归属人或企业管理员）
+      where: {
+        NOT: { status: 'DELETED' },
+        ...this.visibilityFilter(tenantId, viewer),
+      },
       orderBy: { createdAt: 'desc' },
       include: { versions: { orderBy: { version: 'desc' }, take: 1 } },
     });
@@ -485,6 +560,8 @@ class TemplateService {
       name: t.name,
       status: t.status,
       statusLabel: getTemplateDisplayStatus(t.status, t.versions[0]?.published ?? false),
+      ownerUserId: t.ownerUserId ?? null,
+      visibility: t.visibility === 'private' ? 'private' : 'public',
       latestVersion: t.versions[0]?.version ?? 0,
       published: t.versions[0]?.published ?? false,
       thumbnailObjectKey: t.versions[0]?.thumbnailObjectKey ?? null,
@@ -543,12 +620,17 @@ class TemplateService {
    * 流程：读取 PSD → 生成缩略图 → 上传存储 → 更新 DB
    * 若 PSD 文件也已丢失则抛错。
    */
-  async regenerateThumbnail(templateId: string): Promise<{ ok: true; thumbnailObjectKey: string }> {
-    const t = await prisma.template.findUnique({
-      where: { id: templateId },
+  async regenerateThumbnail(
+    templateId: string,
+    tenantId?: string,
+    viewer?: { userId?: string; userAdmin: boolean },
+  ): Promise<{ ok: true; thumbnailObjectKey: string }> {
+    const t = await prisma.template.findFirst({
+      where: { id: templateId, ...this.visibilityFilter(tenantId, viewer) },
       include: { versions: { orderBy: { version: 'desc' }, take: 1 } },
     });
-    if (!t) throw Errors.notFound('模板不存在');
+    if (!t) throw Errors.notFound('模板不存在或无权访问');
+    this.assertTemplateEditable(t, tenantId, viewer);
     const version = t.versions[0];
     if (!version) throw Errors.notFound('模板无版本');
     if (!version.psdObjectKey) throw Errors.validationError('模板缺少 PSD 文件引用，无法生成缩略图');

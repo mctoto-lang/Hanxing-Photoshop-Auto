@@ -14,7 +14,7 @@ import path from 'node:path';
 
 const BASE_URL = process.env.PSD_API_URL ?? 'http://localhost:3000';
 const ADMIN_USER = process.env.ADMIN_USER ?? 'admin';
-const ADMIN_PASS = process.env.ADMIN_PASS ?? 'Admin@2026!';
+const ADMIN_PASS = process.env.ADMIN_PASS ?? 'ChangeMe!Secure2026';
 const API_KEY = process.env.API_KEY ?? 'sk_live_poc_demo_2026';
 
 // ============== 测试结果汇总 ==============
@@ -264,6 +264,80 @@ async function main() {
     if (r.status !== 404) throw new Error(`期望 404，实际 ${r.status}`);
   });
 
+  // P1-29 修复：补充关键端点测试覆盖
+  await runStep('POST /v1/assets/upload-url + PUT + POST /v1/assets/:id/complete（资产确认端到端）', async () => {
+    // 1. 获取上传地址
+    const upResp = await request('POST', `${BASE_URL}/v1/assets/upload-url`, {
+      headers: { Authorization: `Bearer ${API_KEY}` },
+      body: { fileName: 'test-asset.png', mimeType: 'image/png', sizeBytes: 100 },
+    });
+    if (upResp.status !== 200) throw new Error(`upload-url 失败: ${upResp.status}`);
+    const { assetId, uploadUrl, objectKey } = upResp.json;
+
+    // 2. PUT 文件到存储
+    const mockData = Buffer.alloc(100, 0x42);
+    const putResp = await request('PUT', uploadUrl, { body: mockData, headers: { 'Content-Type': 'image/png' } });
+    if (putResp.status !== 200 && putResp.status !== 204) {
+      throw new Error(`PUT 上传失败: ${putResp.status}`);
+    }
+
+    // 3. 调用 complete 确认资产
+    const completeResp = await request('POST', `${BASE_URL}/v1/assets/${assetId}/complete`, {
+      headers: { Authorization: `Bearer ${API_KEY}` },
+      body: { objectKey, sha256: crypto.createHash('sha256').update(mockData).digest('hex') },
+    });
+    if (completeResp.status !== 200) throw new Error(`complete 失败: ${completeResp.status}: ${completeResp.text}`);
+    if (!completeResp.json.ok) throw new Error('complete 响应缺少 ok=true');
+    console.log(`    assetId: ${assetId}, complete: ok`);
+  });
+
+  await runStep('POST /v1/assets/nonexistent/complete（不存在资产 → 404）', async () => {
+    const r = await request('POST', `${BASE_URL}/v1/assets/art_nonexistent/complete`, {
+      headers: { Authorization: `Bearer ${API_KEY}` },
+      body: { objectKey: 'test', sha256: crypto.createHash('sha256').update('test').digest('hex') },
+    });
+    if (r.status !== 404 && r.status !== 422) throw new Error(`期望 404/422，实际 ${r.status}`);
+  });
+
+  await runStep('GET /v1/templates/:templateId（模板详情）', async () => {
+    const listResp = await request('GET', `${BASE_URL}/v1/templates`, {
+      headers: { Authorization: `Bearer ${API_KEY}` },
+    });
+    if (listResp.json.templates.length === 0) {
+      console.log('    跳过（无模板）');
+      return;
+    }
+    const templateId = listResp.json.templates[0].templateId;
+    const r = await request('GET', `${BASE_URL}/v1/templates/${templateId}`, {
+      headers: { Authorization: `Bearer ${API_KEY}` },
+    });
+    if (r.status !== 200) throw new Error(`期望 200，实际 ${r.status}`);
+    if (!r.json.templateId) throw new Error('响应缺少 templateId');
+    if (!r.json.latestVersion) throw new Error('响应缺少 latestVersion');
+    console.log(`    templateId: ${templateId}`);
+  });
+
+  await runStep('POST /v1/render-jobs/:jobId/cancel（取消不存在的任务 → 404）', async () => {
+    const r = await request('POST', `${BASE_URL}/v1/render-jobs/job_cancel_test/cancel`, {
+      headers: { Authorization: `Bearer ${API_KEY}` },
+      body: { reason: 'test' },
+    });
+    if (r.status !== 404 && r.status !== 422) throw new Error(`期望 404/422，实际 ${r.status}`);
+  });
+
+  await runStep('GET /internal/jobs/:jobId/cancel-check（取消信号检查 → 401 无 token）', async () => {
+    const r = await request('GET', `${BASE_URL}/internal/jobs/job_test/cancel-check`);
+    if (r.status !== 401) throw new Error(`期望 401，实际 ${r.status}`);
+  });
+
+  await runStep('POST /v1/render-jobs（缺少 Idempotency-Key → 400）', async () => {
+    const r = await request('POST', `${BASE_URL}/v1/render-jobs`, {
+      headers: { Authorization: `Bearer ${API_KEY}` },
+      body: { templateVersionId: 'tpv_test', input: { test: { text: 'hello' } } },
+    });
+    if (r.status !== 400) throw new Error(`期望 400，实际 ${r.status}`);
+  });
+
   // ========== 4. Worker 注册与内部接口 ==========
   console.log('\n[4/5] Worker 注册与 /internal/* 端点');
   let workerToken: string | null = null;
@@ -474,19 +548,6 @@ function printSummary() {
   } else {
     console.log('\n✓ 集成测试全部通过');
   }
-}
-
-function flattenTree(nodes: any[], parent?: any): any[] {
-  const result: any[] = [];
-  for (const n of nodes) {
-    result.push({ ...n, _parent: parent?.layerPath });
-    if (n.children?.length) result.push(...flattenTree(n.children, n));
-  }
-  return result;
-}
-
-async function fileExists(p: string): Promise<boolean> {
-  try { await fs.access(p); return true; } catch { return false; }
 }
 
 main().catch((e) => { console.error('脚本执行异常:', e); process.exit(1); });

@@ -41,6 +41,11 @@ export interface AuthUser {
   tenantId?: string;
   priority?: number;
   scopes?: string[];
+  // 终端用户身份（由 API Key 持有方即网页后端经请求头透传，服务间信任）：
+  //   X-User-Id    操作用户 ID（模板归属人 / 私有模板可见性判断）
+  //   X-User-Admin 是否企业管理员（"true"/"1"）
+  userId?: string;
+  userAdmin?: boolean;
   // Worker 模式
   workerId?: string;
   workerCode?: string;
@@ -55,6 +60,23 @@ declare module 'fastify' {
   interface FastifyRequest {
     user?: AuthUser;
   }
+}
+
+/** 解析终端用户透传头（X-User-Id / X-User-Admin）；非法值一律忽略 */
+function resolveUserHeaders(req: any): { userId: string; userAdmin: boolean } | undefined {
+  const rawId = req.headers['x-user-id'];
+  const rawAdmin = req.headers['x-user-admin'];
+  let userId: string | undefined;
+  if (typeof rawId === 'string') {
+    const v = rawId.trim();
+    if (v && v.length <= 64 && /^[A-Za-z0-9_.:@-]+$/.test(v)) userId = v;
+  }
+  let userAdmin = false;
+  if (typeof rawAdmin === 'string' && ['true', '1'].includes(rawAdmin.trim().toLowerCase())) {
+    userAdmin = true;
+  }
+  if (!userId && !userAdmin) return undefined;
+  return { userId: userId ?? '', userAdmin };
 }
 
 /** 从完整 API Key 提取前缀（sk_live_ 后的前 12 字符） */
@@ -274,6 +296,8 @@ export default fp(async (app) => {
           scopes: dbKey.scopes
             ? dbKey.scopes.split(',').map((s) => s.trim()).filter(Boolean)
             : [],
+          // 终端用户透传（可选头；charset 受限防注入，长度 ≤64）
+          ...(resolveUserHeaders(req) ?? {}),
         };
 
         // 更新最后使用时间（异步）
