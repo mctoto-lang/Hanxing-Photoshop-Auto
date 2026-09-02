@@ -243,6 +243,11 @@ export function buildNode(
   try {
     const layerIdProxy = typeof rawLayer?.layerId === 'function' ? rawLayer.layerId() : rawLayer?.layerId;
     if (layerIdProxy) {
+      // LazyExecute 只为构造期自有属性（layer/length/data 等）生成 getter，
+      // `id` 在 parse() 执行后才写入实例——直接读 proxy.id / proxy.obj.id 恒为
+      // undefined（layerId=0 的根因）。先访问被代理属性触发 load()→parse()，
+      // 再从底层实例读取；loaded 标志保证重复访问只解析一次。
+      void layerIdProxy.length;
       const realId = layerIdProxy.obj?.id ?? layerIdProxy.id;
       if (typeof realId === 'number') layerId = realId;
       else if (typeof realId === 'string') {
