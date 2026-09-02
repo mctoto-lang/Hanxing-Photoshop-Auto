@@ -953,7 +953,7 @@ export const adminPageHtml = `<!DOCTYPE html>
           const scopes = (k.scopes && k.scopes.length) ? k.scopes.map(s => '<code>'+escapeHtml(s)+'</code>').join(' ') : '<span style="color:#8b95a7">全部</span>';
           let ops = '';
           if (k.active) {
-            ops += '<button class="btn-act" onclick="apiKeyReveal(' + JSON.stringify(k.id) + ')">查看</button>';
+            ops += '<button class="btn-act" onclick="apiKeyReveal(\\'' + k.id + '\\')">查看</button>';
             ops += '<button class="btn-act warn" onclick="apiKeyDisable(\\'' + k.id + '\\')">禁用</button>';
             if (k.quotaPerDay) ops += '<button class="btn-act" onclick="apiKeyResetQuota(\\'' + k.id + '\\')">重置配额</button>';
             ops += '<button class="btn-act" onclick="apiKeyEdit(\\'' + k.id + '\\')">编辑</button>';

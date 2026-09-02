@@ -174,7 +174,19 @@ class ApiKeyService {
     }
     const existing = await prisma.apiKey.findUnique({ where: { keyPrefix } });
     if (existing) {
-      // 已存在同 prefix 记录，幂等跳过
+      // 已存在同 prefix 记录，幂等跳过。但旧版引导创建的记录没有 keyEncrypted
+      // 副本（Admin UI「查看明文」返回 400）。此处自愈：env 明文与库中 hash
+      // 匹配时补写加密副本，使查看功能对 env 引导密钥同样可用。
+      if (!existing.keyEncrypted) {
+        const match = await bcrypt.compare(plaintext, existing.keyHash);
+        if (match) {
+          await prisma.apiKey.update({
+            where: { id: existing.id },
+            data: { keyEncrypted: encryptSecretWithInfo(plaintext, 'api_key') },
+          });
+          logger.info({ keyPrefix, msg: '已为 env 引导密钥补写明文查看副本（keyEncrypted）' });
+        }
+      }
       return;
     }
     const keyHash = await bcrypt.hash(plaintext, BCRYPT_ROUNDS);
@@ -182,6 +194,8 @@ class ApiKeyService {
       data: {
         keyPrefix,
         keyHash,
+        // 与 Admin UI create() 一致：保存可逆加密副本，供「查看明文」使用
+        keyEncrypted: encryptSecretWithInfo(plaintext, 'api_key'),
         name: 'env-bootstrap-default',
         tenantId: 'default',
         active: true,
