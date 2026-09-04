@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "PSD 渲染服务平台 API",
-    "description": "## 概述\nPSD 模板渲染服务平台对外提供 PSD 模板管理、资产上传、渲染任务提交与查询的 HTTP API。\n\n## 鉴权\n所有 `/v1/*` 接口需在 `Authorization` 头携带 API Key（格式：`Bearer sk_live_xxx`）。\nAPI Key 通过 Admin 控制台创建，每个 Key 可配置：\n- 限流（rateLimitPerMin）：每分钟最大请求数\n- 日配额（quotaPerDay）：每天最大请求数\n- 作用域（scopes）：限定可调用的接口\n- IP 白名单（ipWhitelist）\n- 默认 Webhook URL / Secret\n\n## 幂等性\n`POST /v1/render-jobs` 支持通过 `Idempotency-Key` 头实现幂等：\n同租户同 key 重复提交将返回相同任务，不重复创建。\n\n## Webhook\n任务终态（succeeded / failed / cancelled）时自动投递 Webhook 到提交时声明的 `webhookUrl`。\n投递包含 HMAC-SHA256 签名头 `X-Render-Signature`，可校验来源。\n失败自动重试，指数退避：1m / 5m / 15m / 60m / 240m / 960m。\n\n## 错误响应\n所有错误响应统一为 `{ \"error\": \"<CODE>\", \"message\": \"<描述>\", \"details\"?: [...] }`。",
+    "description": "## 概述\nPSD 模板渲染服务平台对外提供 PSD 模板管理、资产上传、渲染任务提交与查询的 HTTP API。\n\n## 鉴权\n所有 `/v1/*` 接口需在 `Authorization` 头携带 API Key（格式：`Bearer sk_live_xxx`）。\nAPI Key 通过 Admin 控制台创建，每个 Key 可配置：\n- 限流（rateLimitPerMin）：每分钟最大请求数\n- 日配额（quotaPerDay）：每天最大请求数\n- IP 白名单（ipWhitelist）\n- 默认 Webhook URL / Secret\n\n## 幂等性\n`POST /v1/render-jobs` 支持通过 `Idempotency-Key` 头实现幂等：\n同租户同 key 重复提交将返回相同任务，不重复创建。\n\n## Webhook\n任务终态（succeeded / failed / cancelled）时自动投递 Webhook 到提交时声明的 `webhookUrl`。\n投递包含 HMAC-SHA256 签名头 `X-Render-Signature`，可校验来源。\n失败自动重试，指数退避：1m / 5m / 15m / 60m / 240m / 960m。\n\n## 错误响应\n所有错误响应统一为 `{ \"error\": \"<CODE>\", \"message\": \"<描述>\", \"details\"?: [...] }`。",
     "version": "0.3.0",
     "contact": {
       "name": "PSD 渲染服务平台"
@@ -641,6 +641,17 @@
               }
             }
           },
+          "400": {
+            "description": "路径参数校验失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "路径参数校验失败"
+                }
+              }
+            }
+          },
           "401": {
             "description": "API Key 无效或缺少 tenantId",
             "content": {
@@ -670,6 +681,143 @@
                 "schema": {
                   "$ref": "#/components/schemas/def-0",
                   "description": "INVALID_INPUT_ASSET：资产不存在/不属于当前租户/未上传完成/大小不符限制/已被其他任务使用"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "触发限流或日配额耗尽",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "触发限流或日配额耗尽"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/assets/import-url": {
+      "post": {
+        "summary": "按 URL 导入素材（服务端拉取 + sha256 秒传）",
+        "tags": [
+          "assets"
+        ],
+        "description": "服务端按 URL 拉取图片并登记为输入资产，返回与 upload-url + complete 相同结构的 `{ assetId, sha256, sizeBytes }`。\n\n**sha256 秒传**：同租户已存在未占用、未过期且内容一致（sha256 相同）的输入资产时直接复用并续期 `INPUT_RETENTION_DAYS`，跳过存储写入（`deduplicated: true`）。\n\n**SSRF 防护**：仅允许 http/https，私有/保留地址段拒绝（生产模式），重定向逐跳重新校验（最多 3 跳）。\n\n限制：仅 JPG/PNG/JPEG，单张 ≤ 150MB，下载超时 60s。",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "url"
+                ],
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "format": "uri",
+                    "maxLength": 2048,
+                    "description": "素材 URL（http/https，公网可达）"
+                  },
+                  "fileName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 255,
+                    "pattern": "^[a-zA-Z0-9._\\-]+$",
+                    "description": "可选，原始文件名（仅字母/数字/点/下划线/连字符）"
+                  },
+                  "mimeType": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "description": "可选，缺省按响应 Content-Type / 文件名推断"
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "assetId",
+                    "sha256",
+                    "sizeBytes",
+                    "deduplicated"
+                  ],
+                  "properties": {
+                    "assetId": {
+                      "type": "string",
+                      "description": "资产编码（art_xxx）"
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "description": "内容 SHA-256（hex）"
+                    },
+                    "sizeBytes": {
+                      "type": "integer",
+                      "description": "字节数"
+                    },
+                    "deduplicated": {
+                      "type": "boolean",
+                      "description": "true=秒传命中已有资产（未新写存储）"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API Key 无效或缺少 tenantId",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "API Key 无效或缺少 tenantId"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "IP 白名单拒绝 / 作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "IP 白名单拒绝 / 作用域不足"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "INVALID_INPUT_ASSET：URL 不允许（SSRF）/下载失败/超时/大小超限/类型不支持",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "INVALID_INPUT_ASSET：URL 不允许（SSRF）/下载失败/超时/大小超限/类型不支持"
                 }
               }
             }
@@ -844,6 +992,14 @@
                   "psMinVersion": {
                     "type": "string",
                     "description": "可选，最低 PS 版本要求，默认 25.0"
+                  },
+                  "visibility": {
+                    "type": "string",
+                    "enum": [
+                      "public",
+                      "private"
+                    ],
+                    "description": "可见性：public=企业内可见（默认）/ private=仅归属人、企业管理员、平台超管"
                   }
                 }
               }
@@ -1032,6 +1188,19 @@
                             "type": "string",
                             "nullable": true,
                             "description": "缩略图对象 key（无缩略图时为 null）"
+                          },
+                          "ownerUserId": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "归属用户（X-User-Id 透传；null=平台共享）"
+                          },
+                          "visibility": {
+                            "type": "string",
+                            "enum": [
+                              "public",
+                              "private"
+                            ],
+                            "description": "可见性：public=企业内 / private=仅归属人、企业管理员、平台超管"
                           },
                           "createdAt": {
                             "type": "string",
@@ -1436,6 +1605,19 @@
                       "type": "string",
                       "description": "模板状态（DRAFT / PUBLISHED / REPUBLISH_REQUIRED / ARCHIVED / DELETED 等）"
                     },
+                    "ownerUserId": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "归属用户（null=平台共享）"
+                    },
+                    "visibility": {
+                      "type": "string",
+                      "enum": [
+                        "public",
+                        "private"
+                      ],
+                      "description": "可见性"
+                    },
                     "latestVersion": {
                       "type": "object",
                       "nullable": true,
@@ -1539,6 +1721,200 @@
                 "schema": {
                   "$ref": "#/components/schemas/def-0",
                   "description": "触发限流或日配额耗尽"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/templates/{id}/thumbnail": {
+      "get": {
+        "summary": "获取模板缩略图",
+        "tags": [
+          "templates"
+        ],
+        "description": "返回模板最新版本缩略图的二进制流（image/png 或 image/jpeg）。模板无缩略图或不存在时返回 404，调用方应降级为占位展示。支持 ETag/If-None-Match 协商缓存（304）。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "description": "模板 ID（tpl_xxx）"
+          }
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "缩略图二进制流",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary",
+                  "description": "缩略图二进制流"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "If-None-Match 命中，缩略图未变化",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string",
+                  "description": "If-None-Match 命中，缩略图未变化"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API Key 无效或缺少 tenantId",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "API Key 无效或缺少 tenantId"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "IP 白名单拒绝 / 作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "IP 白名单拒绝 / 作用域不足"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "模板不存在或无缩略图",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "模板不存在或无缩略图"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "触发限流或日配额耗尽",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "触发限流或日配额耗尽"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/templates/{id}/regenerate-thumbnail": {
+      "post": {
+        "summary": "重新生成模板缩略图",
+        "tags": [
+          "templates"
+        ],
+        "description": "基于最新版本的 PSD 重新生成缩略图。私有模板仅归属人/企业管理员可调用（X-User-Id / X-User-Admin）。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "description": "模板 ID"
+          }
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "thumbnailObjectKey"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "thumbnailObjectKey": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "非公开模板无权操作",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "非公开模板无权操作"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
                 }
               }
             }
@@ -1784,6 +2160,314 @@
             }
           }
         }
+      },
+      "get": {
+        "summary": "批量查询任务",
+        "tags": [
+          "render-jobs"
+        ],
+        "description": "按任务编码批量查询状态、进度与结果下载地址（仅同租户）。结果数组与请求 ids 位置对齐，不存在的编码返回 { jobId, notFound: true }。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "query",
+            "name": "ids",
+            "required": true,
+            "description": "逗号分隔的任务编码列表（1-100 个）"
+          }
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "jobs"
+                  ],
+                  "properties": {
+                    "jobs": {
+                      "type": "array",
+                      "description": "与 ids 位置对齐的任务视图（结构同单任务查询）；不存在的为 { jobId, notFound: true }",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API Key 无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "API Key 无效或缺失"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "IP 白名单拒绝 / 作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "IP 白名单拒绝 / 作用域不足"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "触发限流或日配额耗尽",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "触发限流或日配额耗尽"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/render-jobs/batch": {
+      "post": {
+        "summary": "批量提交渲染任务",
+        "tags": [
+          "render-jobs"
+        ],
+        "description": "一次提交最多 50 个渲染任务。逐项复用单任务提交的全部校验（模板发布状态、私有模板可见性、绑定、资产、幂等），部分失败逐项返回、不中断整批。\n\n**幂等性**：每项通过 `jobs[].idempotencyKey` 实现（同租户下唯一）；未提供时自动生成。命中已有任务时该项返回 `created: false` 与既有任务编码。\n\n**日配额**：按条数计数（批内补增 N-1，鉴权层已计入 1）。\n\n**回调**：批级 `webhookUrl` 作为未显式配置条目的默认回调地址；两者都未传时回落 API Key 上配置的默认回调地址。",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "jobs"
+                ],
+                "properties": {
+                  "jobs": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 50,
+                    "description": "任务条目（结构与单任务提交一致，幂等键改为条目级字段）",
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "templateVersionId",
+                        "input"
+                      ],
+                      "properties": {
+                        "idempotencyKey": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128,
+                          "description": "可选，条目级幂等键（同租户唯一）"
+                        },
+                        "templateVersionId": {
+                          "type": "string",
+                          "description": "已发布的模板版本 ID（tpv_xxx）"
+                        },
+                        "input": {
+                          "type": "object",
+                          "description": "绑定 ID 到输入值的映射（同单任务提交）",
+                          "additionalProperties": {
+                            "type": "object",
+                            "properties": {
+                              "assetId": {
+                                "type": "string"
+                              },
+                              "text": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        },
+                        "output": {
+                          "type": "object",
+                          "properties": {
+                            "format": {
+                              "type": "string",
+                              "enum": [
+                                "png",
+                                "jpeg",
+                                "psd"
+                              ],
+                              "default": "png"
+                            },
+                            "quality": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 100
+                            }
+                          },
+                          "default": {
+                            "format": "png"
+                          }
+                        },
+                        "priority": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 10
+                        },
+                        "jsxTimeoutSeconds": {
+                          "type": "integer",
+                          "minimum": 60,
+                          "maximum": 3600
+                        },
+                        "requiredCapabilities": {
+                          "type": "object",
+                          "description": "可选，能力路由要求"
+                        }
+                      }
+                    }
+                  },
+                  "webhookUrl": {
+                    "type": "string",
+                    "format": "uri",
+                    "description": "可选，批级默认终态回调地址"
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "results"
+                  ],
+                  "properties": {
+                    "results": {
+                      "type": "array",
+                      "description": "与 jobs 位置对齐的逐项结果",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "index",
+                          "ok"
+                        ],
+                        "properties": {
+                          "index": {
+                            "type": "integer",
+                            "description": "对应 jobs 数组的下标"
+                          },
+                          "ok": {
+                            "type": "boolean",
+                            "description": "该项是否创建成功（幂等命中也算成功）"
+                          },
+                          "created": {
+                            "type": "boolean",
+                            "description": "true=新创建；false=幂等命中返回已有任务"
+                          },
+                          "jobId": {
+                            "type": "string",
+                            "description": "任务编码（PSD_YYMMDD_NNNN）"
+                          },
+                          "status": {
+                            "type": "string"
+                          },
+                          "idempotencyKey": {
+                            "type": "string"
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "error": {
+                            "type": "string",
+                            "description": "ok=false 时的错误码"
+                          },
+                          "message": {
+                            "type": "string",
+                            "description": "ok=false 时的错误信息"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API Key 无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "API Key 无效或缺失"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "IP 白名单拒绝 / 作用域不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "IP 白名单拒绝 / 作用域不足"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "触发限流或日配额耗尽",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "触发限流或日配额耗尽"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/v1/render-jobs/{jobId}": {
@@ -1862,7 +2546,12 @@
                     },
                     "resultUrl": {
                       "type": "string",
-                      "description": "结果下载地址（SUCCEEDED 时返回，默认 3 天有效，由 OUTPUT_RETENTION_DAYS 控制）"
+                      "description": "结果下载地址（SUCCEEDED 时返回，默认 3 天有效，由 OUTPUT_RETENTION_DAYS 控制；local 存储模式为相对路径 /storage/download?key=…"
+                    },
+                    "resultToken": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "结果下载签名令牌（local 存储模式返回，调用方以 Authorization: Bearer 携带；COS 模式为 null）"
                     },
                     "resultExpiresAt": {
                       "type": "string",
@@ -2071,11 +2760,12 @@
             }
           },
           "409": {
-            "description": "Default Response",
+            "description": "业务级状态返回（非错误响应）：任务当前状态不允许取消（如已完成/失败）。返回当前 job 状态供客户端决策。",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
+                  "description": "业务级状态返回（非错误响应）：任务当前状态不允许取消（如已完成/失败）。返回当前 job 状态供客户端决策。",
                   "required": [
                     "jobId",
                     "status",
@@ -2911,7 +3601,7 @@
         "tags": [
           "internal-jobs"
         ],
-        "description": "Worker 上报任务失败，含错误码（PHOTOSHOP_SCRIPT_ERROR / TEMPLATE_LAYER_NOT_FOUND / FONT_UNAVAILABLE / INVALID_INPUT_ASSET / WORKER_LOST / JOB_CANCELLED）与错误信息。",
+        "description": "Worker 上报任务失败，含错误码（PHOTOSHOP_SCRIPT_ERROR / TEMPLATE_LAYER_NOT_FOUND / FONT_UNAVAILABLE / INVALID_INPUT_ASSET / WORKER_LOST / JOB_CANCELLED / INVALID_LAYER_BINDING / LEASE_LOST / COMPLETE_REPORT_FAILED）与错误信息。",
         "requestBody": {
           "content": {
             "application/json": {
@@ -2935,7 +3625,10 @@
                       "FONT_UNAVAILABLE",
                       "INVALID_INPUT_ASSET",
                       "WORKER_LOST",
-                      "JOB_CANCELLED"
+                      "JOB_CANCELLED",
+                      "INVALID_LAYER_BINDING",
+                      "LEASE_LOST",
+                      "COMPLETE_REPORT_FAILED"
                     ],
                     "description": "错误码"
                   },
@@ -3106,7 +3799,9 @@
                 "schema": {
                   "type": "object",
                   "required": [
-                    "fonts"
+                    "fonts",
+                    "inventoryHash",
+                    "count"
                   ],
                   "properties": {
                     "fonts": {
@@ -3114,13 +3809,15 @@
                       "description": "已发布字体清单",
                       "items": {
                         "type": "object",
+                        "required": [
+                          "postscriptName",
+                          "familyName",
+                          "style",
+                          "sha256",
+                          "fileUrl",
+                          "fileToken"
+                        ],
                         "properties": {
-                          "id": {
-                            "type": "string"
-                          },
-                          "code": {
-                            "type": "string"
-                          },
                           "postscriptName": {
                             "type": "string"
                           },
@@ -3133,18 +3830,20 @@
                           "sha256": {
                             "type": "string"
                           },
-                          "downloadUrl": {
+                          "fileUrl": {
                             "type": "string"
                           },
-                          "sizeBytes": {
-                            "type": "integer"
-                          },
-                          "status": {
-                            "type": "string",
-                            "description": "PUBLISHED | UNPUBLISHED"
+                          "fileToken": {
+                            "type": "string"
                           }
                         }
                       }
+                    },
+                    "inventoryHash": {
+                      "type": "string"
+                    },
+                    "count": {
+                      "type": "integer"
                     }
                   }
                 }
@@ -3556,6 +4255,7 @@
                           "status",
                           "priority",
                           "attempt",
+                          "maxAttempts",
                           "stage",
                           "progress",
                           "errorCode",
@@ -3563,6 +4263,10 @@
                           "worker",
                           "workerCustomCode",
                           "workerDisplayName",
+                          "resultAvailable",
+                          "resultMimeType",
+                          "resultSizeBytes",
+                          "resultExpiresAt",
                           "createdAt",
                           "succeededAt",
                           "failedAt"
@@ -3580,8 +4284,12 @@
                           "attempt": {
                             "type": "integer"
                           },
+                          "maxAttempts": {
+                            "type": "integer"
+                          },
                           "stage": {
-                            "type": "string"
+                            "type": "string",
+                            "nullable": true
                           },
                           "progress": {
                             "type": "integer"
@@ -3590,11 +4298,15 @@
                             "type": "string",
                             "nullable": true
                           },
+                          "errorMessage": {
+                            "type": "string",
+                            "nullable": true
+                          },
                           "template": {
                             "type": "string"
                           },
                           "worker": {
-                            "type": "object",
+                            "type": "string",
                             "nullable": true
                           },
                           "workerCustomCode": {
@@ -3603,6 +4315,22 @@
                           },
                           "workerDisplayName": {
                             "type": "string",
+                            "nullable": true
+                          },
+                          "resultAvailable": {
+                            "type": "boolean"
+                          },
+                          "resultMimeType": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "resultSizeBytes": {
+                            "type": "integer",
+                            "nullable": true
+                          },
+                          "resultExpiresAt": {
+                            "type": "string",
+                            "format": "date-time",
                             "nullable": true
                           },
                           "createdAt": {
@@ -3634,6 +4362,63 @@
                 "schema": {
                   "$ref": "#/components/schemas/def-0",
                   "description": "未认证"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/api/jobs/{code}/result": {
+      "get": {
+        "summary": "下载任务结果",
+        "tags": [
+          "admin-jobs"
+        ],
+        "description": "流式下载未过期的任务结果文件。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "code",
+            "required": true
+          }
+        ],
+        "security": [
+          {
+            "adminSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
                 }
               }
             }
@@ -6513,6 +7298,95 @@
         }
       }
     },
+    "/admin/api/font-settings": {
+      "get": {
+        "summary": "查看字体全局配置",
+        "tags": [
+          "admin-fonts"
+        ],
+        "security": [
+          {
+            "adminSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "更新字体全局配置",
+        "tags": [
+          "admin-fonts"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "fallbackFontVersionId"
+                ],
+                "properties": {
+                  "fallbackFontVersionId": {
+                    "type": "string",
+                    "nullable": true
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "adminSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/admin/api/fonts/{id}/license-note": {
       "put": {
         "summary": "更新字体许可证备注",
@@ -7797,13 +8671,13 @@
         }
       }
     },
-    "/admin/api/api-keys/{id}/rotate": {
-      "post": {
-        "summary": "轮换 API Key",
+    "/admin/api/api-keys/{id}/plaintext": {
+      "get": {
+        "summary": "查看 API Key 明文",
         "tags": [
           "admin-api-keys"
         ],
-        "description": "生成新的明文 key 并替换 keyHash，旧 key 立即失效。响应中的 `plaintextKey` 仅此一次返回。operator 及以上可调用。",
+        "description": "解密返回该密钥的完整明文（创建时保存的 AES-256-GCM 副本），可反复查看。存量旧密钥未保存副本，返回 400 提示删除重建。operator 及以上可调用。",
         "parameters": [
           {
             "schema": {
@@ -7828,15 +8702,21 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "apiKey": {
-                      "type": "object",
-                      "additionalProperties": true
-                    },
                     "plaintextKey": {
                       "type": "string",
-                      "description": "新明文 API Key（仅此一次返回）"
+                      "description": "完整明文 API Key"
                     }
                   }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
                 }
               }
             }
@@ -9113,7 +9993,7 @@
     },
     {
       "name": "internal-workers",
-      "description": "Worker 内部接口（节点注册/领取任务/心跳）"
+      "description": "Worker 内部接口（节点注册/领取任务/心跳/令牌刷新；Admin UI 也调用列表查询）"
     },
     {
       "name": "internal-jobs",
@@ -9121,7 +10001,7 @@
     },
     {
       "name": "internal-fonts",
-      "description": "Worker 字体清单接口（manifest/上传/注册）"
+      "description": "Worker 字体清单接口（manifest/上传/注册；Admin UI 也调用列表和上传地址）"
     },
     {
       "name": "admin-auth",

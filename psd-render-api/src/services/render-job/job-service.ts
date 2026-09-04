@@ -286,6 +286,112 @@ class RenderJobService {
   }
 
   /**
+   * 批量创建渲染任务（外部 API POST /v1/render-jobs/batch）
+   *
+   * 逐项复用 create 的完整校验（模板发布/私有可见性/绑定/资产/幂等），
+   * 部分失败逐项返回，不中断整批。调用方一次 HTTP 完成多任务提交，
+   * 替代此前「每任务一次请求」的串行链路。
+   *
+   * 日配额：auth 中间件每请求只 +1，这里按条数补增 N-1（尽力而为，
+   * 不做硬阻断以保证部分成功语义；超配额由后续请求在 auth 层拦截）。
+   */
+  async createBatch(params: {
+    tenantId: string;
+    apiKeyId?: string;
+    viewer?: { userId?: string; userAdmin?: boolean };
+    /** 批级默认回调地址（未显式传 body webhookUrl 的条目使用） */
+    batchWebhookUrl?: string;
+    items: Array<
+      Omit<CreateJobParams, 'tenantId' | 'apiKeyId' | 'viewer'> & {
+        idempotencyKey?: string;
+      }
+    >;
+    traceId?: string;
+  }): Promise<
+    Array<
+      | {
+          index: number;
+          ok: true;
+          created: boolean;
+          jobCode: string;
+          status: string;
+          idempotencyKey: string;
+          createdAt: Date;
+        }
+      | { index: number; ok: false; error: string; message: string }
+    >
+  > {
+    if (params.apiKeyId && params.items.length > 1) {
+      await prisma.apiKey
+        .update({
+          where: { id: params.apiKeyId },
+          data: { quotaUsedDay: { increment: params.items.length - 1 } },
+        })
+        .catch(() => {
+          // 配额补增失败不阻断批量提交（尽力而为）
+        });
+    }
+
+    const results = [];
+    for (let i = 0; i < params.items.length; i++) {
+      const item = params.items[i]!;
+      // 未传幂等键的条目自动生成（含序号+随机段，避免同毫秒碰撞）
+      const idempotencyKey =
+        item.idempotencyKey ??
+        `auto-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 10)}`;
+      try {
+        const { job, created } = await this.create({
+          tenantId: params.tenantId,
+          apiKeyId: params.apiKeyId,
+          viewer: params.viewer as { userId?: string; userAdmin: boolean } | undefined,
+          idempotencyKey,
+          templateVersionId: item.templateVersionId,
+          input: item.input,
+          output: item.output,
+          priority: item.priority,
+          jsxTimeoutSeconds: item.jsxTimeoutSeconds,
+          requiredCapabilities: item.requiredCapabilities,
+          targetWorkerId: item.targetWorkerId,
+          webhookUrl: item.webhookUrl ?? params.batchWebhookUrl,
+          traceId: item.traceId ?? params.traceId,
+        });
+        results.push({
+          index: i,
+          ok: true as const,
+          created,
+          jobCode: job.code,
+          status: job.status,
+          idempotencyKey,
+          createdAt: job.createdAt,
+        });
+      } catch (e: any) {
+        results.push({
+          index: i,
+          ok: false as const,
+          error: e instanceof AppError ? e.code : 'INTERNAL_ERROR',
+          message: e?.message ?? '任务创建失败',
+        });
+      }
+    }
+    return results;
+  }
+
+  /**
+   * 批量查询任务（外部 API GET /v1/render-jobs?ids=a,b,c）
+   *
+   * 逐项复用 get 的租户隔离与结果地址生成；不存在的编码返回
+   * { jobId, notFound: true }，与存在项保持位置对齐。
+   */
+  async getMany(codes: string[], tenantId: string) {
+    return Promise.all(
+      codes.map(async (code) => {
+        const job = await this.get(code, tenantId);
+        return job ?? { jobId: code, notFound: true };
+      }),
+    );
+  }
+
+  /**
    * 查询任务
    */
   async get(jobId: string, tenantId: string) {
@@ -596,6 +702,12 @@ class RenderJobService {
 
     const now = new Date();
     const expiresAt = new Date(now.getTime() + env.OUTPUT_RETENTION_DAYS * 86400 * 1000);
+    // webhook payload 附带结果下载地址：调用方收到回调即可直接下载，
+    // 免去一次 GET 查询（resultToken 供 local 存储模式 Bearer 鉴权）
+    const outputDl = await storage.generateDownloadUrl({
+      objectKey: data.resultObjectKey,
+      expiresInSec: env.OUTPUT_RETENTION_DAYS * 86400,
+    });
 
     await prisma.$transaction(async (tx) => {
       // 创建输出产物
@@ -645,6 +757,13 @@ class RenderJobService {
           event: 'job.succeeded',
           targetUrl: job.webhookUrl,
           apiKeyId: job.apiKeyId,
+          payload: {
+            jobCode: job.code,
+            status: 'SUCCEEDED',
+            resultUrl: outputDl.downloadUrl,
+            resultToken: outputDl.downloadToken || null,
+            resultExpiresAt: expiresAt.toISOString(),
+          },
         });
       }
     });
@@ -703,7 +822,12 @@ class RenderJobService {
           event: 'job.failed',
           targetUrl: job.webhookUrl,
           apiKeyId: job.apiKeyId,
-          payload: { errorCode: data.errorCode, errorMessage: data.errorMessage },
+          payload: {
+            jobCode: job.code,
+            status: 'FAILED',
+            errorCode: data.errorCode,
+            errorMessage: data.errorMessage,
+          },
         });
       }
     });
@@ -788,7 +912,12 @@ class RenderJobService {
             event: 'job.cancelled',
             targetUrl: job.webhookUrl,
             apiKeyId: job.apiKeyId,
-            payload: { reason: reason ?? 'caller_requested', source: 'queued' },
+            payload: {
+              jobCode: job.code,
+              status: 'CANCELLED',
+              reason: reason ?? 'caller_requested',
+              source: 'queued',
+            },
           });
         }
         return result;
@@ -855,7 +984,7 @@ class RenderJobService {
     try {
       const job = await prisma.renderJob.findUnique({
         where: { id: jobId },
-        select: { id: true, status: true, workerId: true, webhookUrl: true, apiKeyId: true, cancelReason: true },
+        select: { id: true, code: true, status: true, workerId: true, webhookUrl: true, apiKeyId: true, cancelReason: true },
       });
       if (!job) return { cancelled: false, status: 'UNKNOWN' };
       // workerId 不匹配时返回 'UNKNOWN'，避免向非持有方泄露任务状态
@@ -886,7 +1015,12 @@ class RenderJobService {
                 event: 'job.cancelled',
                 targetUrl: job.webhookUrl,
                 apiKeyId: job.apiKeyId,
-                payload: { reason: job.cancelReason ?? 'caller_requested', source: 'worker' },
+                payload: {
+                  jobCode: job.code,
+                  status: 'CANCELLED',
+                  reason: job.cancelReason ?? 'caller_requested',
+                  source: 'worker',
+                },
               });
             }
           }
@@ -1049,6 +1183,23 @@ class RenderJobService {
         where: { id: job.workerId, currentJobId: job.id },
         data: { currentJobId: null },
       });
+    }
+    // 管理员强制取消同样回调订阅方（与用户侧 cancel 一致，终态不缺通知）
+    if (job.webhookUrl) {
+      await webhookService
+        .enqueueOutbox(prisma, {
+          jobId: job.id,
+          event: 'job.cancelled',
+          targetUrl: job.webhookUrl,
+          apiKeyId: job.apiKeyId,
+          payload: {
+            jobCode: job.code,
+            status: 'CANCELLED',
+            reason: `admin_force_cancel by ${operator}`,
+            source: 'admin',
+          },
+        })
+        .catch(() => {});
     }
     logger.info({
       jobId: job.id,
@@ -1233,7 +1384,7 @@ class RenderJobService {
         cancelReason: `admin_batch_cancel by ${operator}`,
         cancelledAt: now,
       },
-      select: { workerId: true },
+      select: { id: true, workerId: true, code: true, webhookUrl: true, apiKeyId: true },
     });
     const workerIdsToRelease = [...new Set(
       affectedJobs.map((j) => j.workerId).filter(Boolean),
@@ -1248,6 +1399,25 @@ class RenderJobService {
           }),
         ),
       );
+    }
+
+    // 批量取消同样逐任务回调订阅方（带 webhookUrl 的任务）
+    for (const j of affectedJobs) {
+      if (!j.webhookUrl) continue;
+      await webhookService
+        .enqueueOutbox(prisma, {
+          jobId: j.id,
+          event: 'job.cancelled',
+          targetUrl: j.webhookUrl,
+          apiKeyId: j.apiKeyId,
+          payload: {
+            jobCode: j.code,
+            status: 'CANCELLED',
+            reason: `admin_batch_cancel by ${operator}`,
+            source: 'admin',
+          },
+        })
+        .catch(() => {});
     }
 
     logger.info({

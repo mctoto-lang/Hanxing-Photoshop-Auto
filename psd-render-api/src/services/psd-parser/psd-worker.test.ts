@@ -18,10 +18,12 @@ test('缩略图生成优先用 ag-psd 读取合成图 + Resource 1036', () => {
   assert.match(workerSrc, /imageResources\?\.thumbnail/);
 });
 
-test('缩略图合成图残缺时（覆盖率 < 50%）回退到 Resource 1036', () => {
-  // 部分 PSD 的合成图不完整/过时，需检测覆盖率后跳过
+test('缩略图合成图近乎为空时（覆盖率 ≤ 0.2%）回退到 Resource 1036', () => {
+  // 部分 PSD 的合成图不完整/过时，需检测覆盖率后跳过。
+  // 阈值为 0.2% 而非 50%：T恤/手机壳等透明底样机的不透明覆盖率天然偏低，
+  // 仅排除「近乎为空」的残缺读取，透明区由白底 flatten 兜底
   assert.match(workerSrc, /computeOpaqueCoverage/);
-  assert.match(workerSrc, /coverage > 0\.5/);
+  assert.match(workerSrc, /coverage > 0\.002/);
 });
 
 test('缩略图回退到 psd 包的 Image Data Section（兼容 ag-psd 失败的情况）', () => {

@@ -17,7 +17,8 @@
     "test": "tsx --test src/**/*.test.ts",
     "verify": "tsx scripts/verify-poc.ts",
     "verify:smoke": "tsx scripts/verify-poc.ts --skip-psd-parse",
-    "verify:phase2": "tsx scripts/verify-phase2.ts"
+    "verify:phase2": "tsx scripts/verify-phase2.ts",
+    "openapi:dump": "node scripts/dump-openapi.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^9.0.1",

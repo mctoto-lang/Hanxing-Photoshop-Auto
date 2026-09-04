@@ -21,6 +21,7 @@ import { prisma } from '../../lib/prisma.js';
 import { logger } from '../../lib/logger.js';
 import { env } from '../../config/env.js';
 import { genLeaseToken } from '../../lib/crypto.js';
+import { webhookService } from '../webhook/webhook-service.js';
 
 export interface ClaimRequest {
   workerId: string;
@@ -400,6 +401,21 @@ export async function startLeaseReaper(): Promise<void> {
                 metrics: JSON.stringify({ attempt: job.attempt, maxAttempts: job.maxAttempts }),
               },
             });
+            // 回收器判 FAILED 与 Worker 主动 fail 一致：回调订阅方（终态不缺通知）
+            if (job.webhookUrl) {
+              await webhookService.enqueueOutbox(tx, {
+                jobId: job.id,
+                event: 'job.failed',
+                targetUrl: job.webhookUrl,
+                apiKeyId: job.apiKeyId,
+                payload: {
+                  jobCode: job.code,
+                  status: 'FAILED',
+                  errorCode: 'WORKER_LOST',
+                  errorMessage: `租约超时且已达最大重试次数 (${job.maxAttempts})`,
+                },
+              });
+            }
             logger.warn({ jobId: job.id, msg: '任务租约超时，标记 FAILED' });
           } else {
             logger.warn({ jobId: job.id, attempt: job.attempt + 1, msg: '租约超时，回收重排队' });

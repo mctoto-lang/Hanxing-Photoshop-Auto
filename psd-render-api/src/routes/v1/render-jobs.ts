@@ -1,8 +1,10 @@
 /**
  * 外部 API - 渲染任务
  *
- * POST /v1/render-jobs        提交渲染任务（含 Idempotency-Key）
- * GET  /v1/render-jobs/:jobId 查询任务状态与结果下载地址
+ * POST /v1/render-jobs              提交渲染任务（含 Idempotency-Key）
+ * POST /v1/render-jobs/batch        批量提交渲染任务（≤50，逐项幂等）
+ * GET  /v1/render-jobs?ids=a,b,c    批量查询任务状态（≤100）
+ * GET  /v1/render-jobs/:jobId       查询任务状态与结果下载地址
  * POST /v1/render-jobs/:jobId/cancel  请求取消任务
  */
 import { FastifyInstance } from 'fastify';
@@ -46,6 +48,14 @@ const createSchema = z.object({
     supportsTextLayer: z.boolean().optional(),
     os: z.string().optional(),
   }).optional(),
+});
+
+// 批量提交：条目复用单任务校验，幂等键改为条目级字段（批量无法逐条带请求头）
+const batchCreateSchema = z.object({
+  jobs: z.array(createSchema.omit({ webhookUrl: true }).extend({
+    idempotencyKey: z.string().min(1).max(128).optional(),
+  })).min(1).max(50),
+  webhookUrl: webhookUrlSchema.optional(),
 });
 
 export async function renderJobRoutes(app: FastifyInstance) {
@@ -184,7 +194,8 @@ export async function renderJobRoutes(app: FastifyInstance) {
       input: parsed.data.input as any,
       output: parsed.data.output as any,
       priority: parsed.data.priority,
-      webhookUrl: parsed.data.webhookUrl,
+      // 未显式传 body webhookUrl 时回落 API Key 配置的默认回调地址
+      webhookUrl: parsed.data.webhookUrl ?? (user.webhookUrlDefault || undefined),
       requiredCapabilities: parsed.data.requiredCapabilities,
       jsxTimeoutSeconds: parsed.data.jsxTimeoutSeconds,
       traceId,
@@ -198,6 +209,175 @@ export async function renderJobRoutes(app: FastifyInstance) {
       traceId,
       createdAt: job.createdAt,
     });
+  });
+
+  // 批量提交渲染任务（一次 HTTP 完成多任务，替代逐个串行请求）
+  app.post('/v1/render-jobs/batch', {
+    preHandler: [app.authenticateApiKey],
+    schema: {
+      tags: ['render-jobs'],
+      summary: '批量提交渲染任务',
+      description: [
+        '一次提交最多 50 个渲染任务。逐项复用单任务提交的全部校验（模板发布状态、私有模板可见性、绑定、资产、幂等），部分失败逐项返回、不中断整批。',
+        '',
+        '**幂等性**：每项通过 `jobs[].idempotencyKey` 实现（同租户下唯一）；未提供时自动生成。命中已有任务时该项返回 `created: false` 与既有任务编码。',
+        '',
+        '**日配额**：按条数计数（批内补增 N-1，鉴权层已计入 1）。',
+        '',
+        '**回调**：批级 `webhookUrl` 作为未显式配置条目的默认回调地址；两者都未传时回落 API Key 上配置的默认回调地址。',
+      ].join('\n'),
+      security: [{ apiKey: [] }],
+      body: {
+        type: 'object',
+        required: ['jobs'],
+        properties: {
+          jobs: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 50,
+            description: '任务条目（结构与单任务提交一致，幂等键改为条目级字段）',
+            items: {
+              type: 'object',
+              required: ['templateVersionId', 'input'],
+              properties: {
+                idempotencyKey: { type: 'string', minLength: 1, maxLength: 128, description: '可选，条目级幂等键（同租户唯一）' },
+                templateVersionId: { type: 'string', description: '已发布的模板版本 ID（tpv_xxx）' },
+                input: {
+                  type: 'object',
+                  description: '绑定 ID 到输入值的映射（同单任务提交）',
+                  additionalProperties: {
+                    type: 'object',
+                    properties: {
+                      assetId: { type: 'string' },
+                      text: { type: 'string' },
+                    },
+                  },
+                },
+                output: {
+                  type: 'object',
+                  properties: {
+                    format: { type: 'string', enum: ['png', 'jpeg', 'psd'], default: 'png' },
+                    quality: { type: 'integer', minimum: 1, maximum: 100 },
+                  },
+                  default: { format: 'png' },
+                },
+                priority: { type: 'integer', minimum: 1, maximum: 10 },
+                jsxTimeoutSeconds: { type: 'integer', minimum: 60, maximum: 3600 },
+                requiredCapabilities: { type: 'object', description: '可选，能力路由要求' },
+              },
+            },
+          },
+          webhookUrl: { type: 'string', format: 'uri', description: '可选，批级默认终态回调地址' },
+        },
+      },
+      response: {
+        200: {
+          type: 'object',
+          required: ['results'],
+          properties: {
+            results: {
+              type: 'array',
+              description: '与 jobs 位置对齐的逐项结果',
+              items: {
+                type: 'object',
+                required: ['index', 'ok'],
+                properties: {
+                  index: { type: 'integer', description: '对应 jobs 数组的下标' },
+                  ok: { type: 'boolean', description: '该项是否创建成功（幂等命中也算成功）' },
+                  created: { type: 'boolean', description: 'true=新创建；false=幂等命中返回已有任务' },
+                  jobId: { type: 'string', description: '任务编码（PSD_YYMMDD_NNNN）' },
+                  status: { type: 'string' },
+                  idempotencyKey: { type: 'string' },
+                  createdAt: { type: 'string', format: 'date-time' },
+                  error: { type: 'string', description: 'ok=false 时的错误码' },
+                  message: { type: 'string', description: 'ok=false 时的错误信息' },
+                },
+              },
+            },
+          },
+        },
+        400: { $ref: 'ErrorResponse#' },
+        401: { $ref: 'ErrorResponse#', description: 'API Key 无效或缺失' },
+        403: { $ref: 'ErrorResponse#', description: 'IP 白名单拒绝 / 作用域不足' },
+        429: { $ref: 'ErrorResponse#', description: '触发限流或日配额耗尽' },
+      },
+    },
+  }, async (req, reply) => {
+    const parsed = batchCreateSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: 'VALIDATION_ERROR',
+        message: '参数校验失败',
+        details: parsed.error.issues,
+      });
+    }
+
+    const user = req.user as any;
+    const viewer =
+      typeof user.userId === 'string' && user.userId
+        ? { userId: user.userId, userAdmin: user.userAdmin === true }
+        : user.userAdmin === true
+          ? { userAdmin: true }
+          : undefined;
+
+    const results = await renderJobService.createBatch({
+      tenantId: user.tenantId ?? 'default',
+      apiKeyId: user.apiKeyId,
+      viewer,
+      batchWebhookUrl:
+        parsed.data.webhookUrl ?? (user.webhookUrlDefault || undefined),
+      items: parsed.data.jobs as any,
+    });
+
+    return reply.send({ results });
+  });
+
+  // 批量查询任务（一次 HTTP 拉取多个任务状态，替代逐个轮询）
+  app.get('/v1/render-jobs', {
+    preHandler: [app.authenticateApiKey],
+    schema: {
+      tags: ['render-jobs'],
+      summary: '批量查询任务',
+      description:
+        '按任务编码批量查询状态、进度与结果下载地址（仅同租户）。结果数组与请求 ids 位置对齐，不存在的编码返回 { jobId, notFound: true }。',
+      security: [{ apiKey: [] }],
+      querystring: {
+        type: 'object',
+        required: ['ids'],
+        properties: {
+          ids: { type: 'string', description: '逗号分隔的任务编码列表（1-100 个）' },
+        },
+      },
+      response: {
+        200: {
+          type: 'object',
+          required: ['jobs'],
+          properties: {
+            jobs: {
+              type: 'array',
+              description: '与 ids 位置对齐的任务视图（结构同单任务查询）；不存在的为 { jobId, notFound: true }',
+              items: { type: 'object', additionalProperties: true },
+            },
+          },
+        },
+        400: { $ref: 'ErrorResponse#' },
+        401: { $ref: 'ErrorResponse#', description: 'API Key 无效或缺失' },
+        403: { $ref: 'ErrorResponse#', description: 'IP 白名单拒绝 / 作用域不足' },
+        429: { $ref: 'ErrorResponse#', description: '触发限流或日配额耗尽' },
+      },
+    },
+  }, async (req, reply) => {
+    const raw = (req.query as any).ids as string;
+    const ids = raw.split(',').map((s) => s.trim()).filter(Boolean);
+    if (ids.length === 0) {
+      return reply.code(400).send({ error: 'VALIDATION_ERROR', message: 'ids 不能为空' });
+    }
+    if (ids.length > 100) {
+      return reply.code(400).send({ error: 'VALIDATION_ERROR', message: '一次最多查询 100 个任务' });
+    }
+    const user = req.user as any;
+    const jobs = await renderJobService.getMany(ids, user.tenantId ?? 'default');
+    return reply.send({ jobs });
   });
 
   // 查询任务

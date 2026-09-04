@@ -18,6 +18,43 @@ import { getStorage } from '../../services/storage/index.js';
 import { env } from '../../config/env.js';
 import type { LayerSchema } from '../../types/index.js';
 
+/**
+ * 缩略图字节级 LRU 缓存（模块级，进程内共享）
+ *
+ * 缩略图按版本生成（objectKey 内含版本号，不可变），缓存无失效问题；
+ * regenerate-thumbnail 会产生新 objectKey，旧条目自然被淘汰。
+ * 网页端每个模板一格高频拉取，命中后免存储层（COS/磁盘）回源。
+ */
+const THUMB_CACHE_MAX_ENTRIES = 100;
+const THUMB_CACHE_MAX_BYTES = 50 * 1024 * 1024;
+const thumbCache = new Map<string, { buf: Buffer; mime: string; bytes: number }>();
+let thumbCacheBytes = 0;
+
+function thumbCacheGet(objectKey: string) {
+  const hit = thumbCache.get(objectKey);
+  if (!hit) return undefined;
+  // Map 迭代顺序按插入时间：删掉重插实现 LRU 新鲜度
+  thumbCache.delete(objectKey);
+  thumbCache.set(objectKey, hit);
+  return hit;
+}
+
+function thumbCacheSet(objectKey: string, value: { buf: Buffer; mime: string }) {
+  if (thumbCache.has(objectKey)) return;
+  thumbCache.set(objectKey, { ...value, bytes: value.buf.length });
+  thumbCacheBytes += value.buf.length;
+  while (
+    (thumbCache.size > THUMB_CACHE_MAX_ENTRIES || thumbCacheBytes > THUMB_CACHE_MAX_BYTES) &&
+    thumbCache.size > 0
+  ) {
+    const oldest = thumbCache.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    const evicted = thumbCache.get(oldest);
+    thumbCache.delete(oldest);
+    if (evicted) thumbCacheBytes -= evicted.bytes;
+  }
+}
+
 export async function templateRoutes(app: FastifyInstance) {
   // 获取 PSD 上传地址
   app.post('/v1/templates/upload-url', {
@@ -437,7 +474,7 @@ export async function templateRoutes(app: FastifyInstance) {
     schema: {
       tags: ['templates'],
       summary: '获取模板缩略图',
-      description: '返回模板最新版本缩略图的二进制流（image/png 或 image/jpeg）。模板无缩略图或不存在时返回 404，调用方应降级为占位展示。',
+      description: '返回模板最新版本缩略图的二进制流（image/png 或 image/jpeg）。模板无缩略图或不存在时返回 404，调用方应降级为占位展示。支持 ETag/If-None-Match 协商缓存（304）。',
       security: [{ apiKey: [] }],
       params: {
         type: 'object',
@@ -452,6 +489,7 @@ export async function templateRoutes(app: FastifyInstance) {
           format: 'binary',
           description: '缩略图二进制流',
         },
+        304: { type: 'string', description: 'If-None-Match 命中，缩略图未变化' },
         401: { $ref: 'ErrorResponse#', description: 'API Key 无效或缺少 tenantId' },
         403: { $ref: 'ErrorResponse#', description: 'IP 白名单拒绝 / 作用域不足' },
         404: { $ref: 'ErrorResponse#', description: '模板不存在或无缩略图' },
@@ -464,21 +502,34 @@ export async function templateRoutes(app: FastifyInstance) {
     if (!tenantId) {
       return reply.code(401).send({ error: 'UNAUTHORIZED', message: 'API Key 缺少 tenantId' });
     }
-    const detail = await templateService.getDetail(templateId, tenantId, templateViewerFrom(req.user));
-    const objectKey = detail?.latestVersion?.thumbnailObjectKey;
-    if (!detail || !objectKey) {
+    // 轻量查询：只取最新版本的 objectKey（getDetail 会拉全部版本的
+    // layerTree/layerSchema 大 JSON，缩略图高频端点承担不起）
+    const meta = await templateService.getThumbnailMeta(templateId, tenantId, templateViewerFrom(req.user));
+    if (!meta) {
       return reply.code(404).send({ error: 'NOT_FOUND', message: '模板不存在或无缩略图' });
+    }
+    const mime = /\.(jpe?g)$/i.test(meta.objectKey) ? 'image/jpeg' : 'image/png';
+    // ETag 取自 objectKey（内含版本号，按版本不可变）→ 协商缓存 304
+    const etag = `"${meta.objectKey}"`;
+    reply.header('ETag', etag);
+    reply.header('Cache-Control', 'private, max-age=600');
+    if (req.headers['if-none-match'] === etag) {
+      return reply.code(304).send();
+    }
+    const cached = thumbCacheGet(meta.objectKey);
+    if (cached) {
+      reply.header('Content-Type', cached.mime);
+      return reply.send(cached.buf);
     }
     const storage = await getStorage();
     let buf: Buffer;
     try {
-      buf = await storage.getObject(objectKey);
+      buf = await storage.getObject(meta.objectKey);
     } catch {
       return reply.code(404).send({ error: 'NOT_FOUND', message: '缩略图对象不存在' });
     }
-    const mime = /\.(jpe?g)$/i.test(objectKey) ? 'image/jpeg' : 'image/png';
+    thumbCacheSet(meta.objectKey, { buf, mime });
     reply.header('Content-Type', mime);
-    reply.header('Cache-Control', 'private, max-age=600');
     return reply.send(buf);
   });
 

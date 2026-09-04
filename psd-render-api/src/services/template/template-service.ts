@@ -538,6 +538,32 @@ class TemplateService {
   }
 
   /**
+   * 缩略图轻量查询：只取最新版本的 thumbnailObjectKey。
+   *
+   * 缩略图端点高频调用（网页端每个模板一格），不能再走 getDetail——
+   * 它会 include 全部版本的 layerTree/layerSchema 大 JSON 并逐个 JSON.parse，
+   * 只为拿一个 objectKey。可见性过滤与 getDetail 完全一致。
+   */
+  async getThumbnailMeta(
+    templateId: string,
+    tenantId?: string,
+    viewer?: { userId?: string; userAdmin: boolean },
+  ): Promise<{ objectKey: string } | null> {
+    const template = await prisma.template.findFirst({
+      where: { id: templateId, ...this.visibilityFilter(tenantId, viewer) },
+      select: {
+        versions: {
+          orderBy: { version: 'desc' },
+          take: 1,
+          select: { thumbnailObjectKey: true },
+        },
+      },
+    });
+    const objectKey = template?.versions[0]?.thumbnailObjectKey;
+    return objectKey ? { objectKey } : null;
+  }
+
+  /**
    * P0 安全修复（严重 S2）：外部 API 调用必须传 tenantId，Admin 跨租户管理可不传
    */
   async list(

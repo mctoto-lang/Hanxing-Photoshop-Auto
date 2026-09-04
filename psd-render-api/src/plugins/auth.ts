@@ -41,6 +41,9 @@ export interface AuthUser {
   tenantId?: string;
   priority?: number;
   scopes?: string[];
+  // 该 API Key 配置的默认 Webhook 回调地址（Admin 维护）；提交任务未显式
+  // 传 webhookUrl 时作为兜底，避免调用方每单都要带
+  webhookUrlDefault?: string | null;
   // 终端用户身份（由 API Key 持有方即网页后端经请求头透传，服务间信任）：
   //   X-User-Id    操作用户 ID（模板归属人 / 私有模板可见性判断）
   //   X-User-Admin 是否企业管理员（"true"/"1"）
@@ -296,6 +299,7 @@ export default fp(async (app) => {
           scopes: dbKey.scopes
             ? dbKey.scopes.split(',').map((s) => s.trim()).filter(Boolean)
             : [],
+          webhookUrlDefault: dbKey.webhookUrlDefault ?? null,
           // 终端用户透传（可选头；charset 受限防注入，长度 ≤64）
           ...(resolveUserHeaders(req) ?? {}),
         };

@@ -42,3 +42,6 @@ api-test-report.txt
 .trae/
 debug-*.md
 psd-render-api/_*.cjs
+
+# ZCode 工具工作区目录
+.zcode/

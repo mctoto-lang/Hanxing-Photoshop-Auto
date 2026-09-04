@@ -409,7 +409,7 @@ async function handleThumbnail(filePath: string, maxWidth: number): Promise<Buff
 
   // 优先方案：用 ag-psd 同时读取合成图与 Resource 1036
   //   1) 先试合成图（Image Data Section）— 分辨率高（如 1000×1000），缩放到 maxWidth 是下采样，画质好
-  //   2) 合成图残缺时（覆盖率 < 50%，部分 PSD 的合成图不完整/过时）回退到 Resource 1036
+  //   2) 合成图近乎为空时（覆盖率 ≤ 0.2%，残缺/过时读取）回退到 Resource 1036
   //      — Photoshop 保存时生成，始终代表完整画布的正确预览，但分辨率较低（通常 160×160），需放大
   const agPsdThumb = await generateThumbnailWithAgPsd(buf, maxWidth);
   if (agPsdThumb) return agPsdThumb;
@@ -445,7 +445,8 @@ async function handleThumbnail(filePath: string, maxWidth: number): Promise<Buff
  *
  * 策略（按画质从高到低）：
  *   1. 合成图（Image Data Section）— 原始分辨率，下采样画质最佳
- *      但部分 PSD 的合成图不完整/过时（覆盖率 < 50%），需跳过
+ *      仅排除「近乎为空」的残缺/过时读取（覆盖率 ≤ 0.2%）；透明底样机
+ *      （T恤/手机壳等）覆盖率天然偏低，透明区由白底 flatten 兜底
  *   2. Resource 1036（JPEG 缩略图）— Photoshop 保存时生成，始终正确
  *      但分辨率较低（通常 160×160），放大到 maxWidth 会有轻微模糊
  *
