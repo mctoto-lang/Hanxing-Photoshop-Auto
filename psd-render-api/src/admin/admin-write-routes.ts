@@ -1512,7 +1512,7 @@ export async function adminWriteRoutes(app: FastifyInstance) {
     schema: {
       tags: ['admin-jobs'],
       summary: '批量删除已完成任务',
-      description: '删除所有已完成（SUCCEEDED/FAILED/CANCELLED）的任务记录，同时清理关联的心跳和产物记录。进行中的任务不受影响。operator 及以上可调用。',
+      description: '删除所有已完成（SUCCEEDED/FAILED/CANCELLED）的任务记录，同时清理关联的心跳记录（输入素材可多任务共享，不随任务删除，由过期清理器按保留期回收）。进行中的任务不受影响。operator 及以上可调用。',
       security: [{ adminSession: [] }],
       response: {
         200: {
@@ -1531,13 +1531,14 @@ export async function adminWriteRoutes(app: FastifyInstance) {
     const jobIds = jobs.map((j) => j.id);
     let deleted = 0;
     if (jobIds.length > 0) {
-      // 事务：先删关联数据，再删任务
+      // 事务：先删关联数据，再删任务。
+      // 输入素材（Artifact）不随任务删除：素材允许多任务共享，且可能仍被
+      // 在途任务引用；统一由过期清理器（startArtifactReaper）按 expiresAt 回收
       const result = await prisma.$transaction([
         prisma.jobHeartbeat.deleteMany({ where: { jobId: { in: jobIds } } }),
-        prisma.artifact.deleteMany({ where: { jobId: { in: jobIds } } }),
         prisma.renderJob.deleteMany({ where: { id: { in: jobIds } } }),
       ]);
-      deleted = result[2].count;
+      deleted = result[1].count;
     }
     auditService.recordFromReq(req, {
       action: 'job_batch_delete', refType: 'job',

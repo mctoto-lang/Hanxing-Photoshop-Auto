@@ -161,6 +161,11 @@ const schema = z.object({
   ALERT_MIN_SEVERITY: z.enum(['INFO', 'WARN', 'ERROR', 'CRITICAL']).default('WARN'),
   // 通知超时（毫秒）
   ALERT_NOTIFY_TIMEOUT_MS: z.coerce.number().default(5000),
+
+  // ===== API Key 未配置 rateLimitPerMin 时的全局默认限流（次/分钟） =====
+  // 服务端集成（批量替换：素材导入 + 任务提交 + 状态轮询）调用量高于人工调用，
+  // 可按部署上调（如 120-300）；单个 Key 仍可在 Admin UI 按 Key 覆盖。
+  RATE_LIMIT_PER_MIN: z.coerce.number().int().min(1).max(100000).default(60),
 });
 
 const parsed = schema.safeParse(process.env);

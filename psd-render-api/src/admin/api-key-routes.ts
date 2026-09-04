@@ -248,7 +248,7 @@ export async function apiKeyRoutes(app: FastifyInstance) {
         properties: {
           name: { type: 'string', minLength: 1, maxLength: 100, description: 'API Key 名称' },
           priority: { type: 'integer', minimum: 1, maximum: 10, description: '优先级（1 最高，10 最低）' },
-          rateLimitPerMin: { type: 'integer', minimum: 1, nullable: true, description: '每分钟限流（null 表示不限流）' },
+          rateLimitPerMin: { type: 'integer', minimum: 1, nullable: true, description: '每分钟限流（null 表示使用全局默认 RATE_LIMIT_PER_MIN）' },
           quotaPerDay: { type: 'integer', minimum: 1, nullable: true, description: '每日配额（null 表示不限配额）' },
           scopes: { type: 'array', items: { type: 'string', minLength: 1, maxLength: 64 }, description: '权限 scopes 列表' },
           // C6 修复：webhookUrlDefault 类型与 zod updateSchema 中的 webhookUrlDefaultSchema

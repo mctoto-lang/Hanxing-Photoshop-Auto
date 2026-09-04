@@ -3,7 +3,7 @@
  * POST /v1/assets/upload-url
  *   获取输入文件 COS 预签名上传地址，返回 assetId
  * POST /v1/assets/import-url
- *   服务端按 URL 拉取素材（sha256 秒传：同租户已有同内容未占用资产直接复用）
+ *   服务端按 URL 拉取素材（sha256 秒传：同租户已有同内容资产直接复用，素材可多任务共享）
  *
  * 输入限制：JPG / PNG / JPEG，单张 ≤ env.MAX_INPUT_SIZE_MB，累计 ≤ env.MAX_INPUT_SIZE_MB，输入保留 env.INPUT_RETENTION_DAYS 天
  */
@@ -151,7 +151,7 @@ export async function assetsRoutes(app: FastifyInstance) {
     schema: {
       tags: ['assets'],
       summary: '确认资产上传完成',
-      description: '客户端通过 `POST /v1/assets/upload-url` 拿到预签名地址并 PUT 上传完成后，调用本接口回填实际 sha256/sizeBytes/mime。\n\n服务端会校验：\n- 资产存在且属于当前租户（jobId 为 null，即未被任何任务占用）\n- 存储中对象已存在（HEAD 检查）\n- 大小不超过 `MAX_INPUT_SIZE_MB`\n\n校验通过后将资产标记为可用，提交渲染任务时即可在 `input.{bindingId}.assetId` 引用。\n\n注意：资产不存在 / 未上传完成 / 大小超限 / 已被其他任务使用 等情况均统一返回 422 `INVALID_INPUT_ASSET`，详见各响应描述。',
+      description: '客户端通过 `POST /v1/assets/upload-url` 拿到预签名地址并 PUT 上传完成后，调用本接口回填实际 sha256/sizeBytes/mime。\n\n服务端会校验：\n- 资产存在且属于当前租户（素材可被多任务共享）\n- 存储中对象已存在（HEAD 检查）\n- 大小不超过 `MAX_INPUT_SIZE_MB`\n\n校验通过后将资产标记为可用，提交渲染任务时即可在 `input.{bindingId}.assetId` 引用。\n\n注意：资产不存在 / 未上传完成 / 大小超限 等情况均统一返回 422 `INVALID_INPUT_ASSET`，详见各响应描述。',
       security: [{ apiKey: [] }],
       params: { type: 'object', required: ['assetId'], properties: { assetId: { type: 'string', description: '资产编码（art_xxx），由 upload-url 接口返回' } } },
       response: {
@@ -168,14 +168,15 @@ export async function assetsRoutes(app: FastifyInstance) {
         400: { $ref: 'ErrorResponse#', description: '路径参数校验失败' },
         401: { $ref: 'ErrorResponse#', description: 'API Key 无效或缺少 tenantId' },
         403: { $ref: 'ErrorResponse#', description: 'IP 白名单拒绝 / 作用域不足' },
-        422: { $ref: 'ErrorResponse#', description: 'INVALID_INPUT_ASSET：资产不存在/不属于当前租户/未上传完成/大小不符限制/已被其他任务使用' },
+        422: { $ref: 'ErrorResponse#', description: 'INVALID_INPUT_ASSET：资产不存在/不属于当前租户/未上传完成/大小不符限制' },
         429: { $ref: 'ErrorResponse#', description: '触发限流或日配额耗尽' },
       },
     },
   }, async (req, reply) => {
     const tenantId = req.user?.tenantId;
     const assetId = (req.params as { assetId: string }).assetId;
-    const artifact = await prisma.artifact.findFirst({ where: { code: assetId, tenantId, kind: 'input', jobId: null } });
+    // 素材允许多任务共享：不再按 jobId 排他
+    const artifact = await prisma.artifact.findFirst({ where: { code: assetId, tenantId, kind: 'input' } });
     if (!artifact) throw Errors.invalidInputAsset('资产不存在或不属于当前租户');
     const storage = await getStorage();
     const meta = await storage.headObject(artifact.objectKey);
@@ -184,11 +185,10 @@ export async function assetsRoutes(app: FastifyInstance) {
       throw Errors.invalidInputAsset('资产大小不符合限制');
     }
     const digest = meta.sha256 ?? sha256(await storage.getObject(artifact.objectKey));
-    const updated = await prisma.artifact.updateMany({
-      where: { id: artifact.id, jobId: null },
+    await prisma.artifact.update({
+      where: { id: artifact.id },
       data: { sha256: digest, sizeBytes: meta.size, mimeType: meta.mimeType },
     });
-    if (updated.count !== 1) throw Errors.invalidInputAsset('资产已被其他任务使用');
     return reply.send({ assetId, sha256: digest, sizeBytes: meta.size });
   });
 
@@ -201,7 +201,7 @@ export async function assetsRoutes(app: FastifyInstance) {
       description: [
         '服务端按 URL 拉取图片并登记为输入资产，返回与 upload-url + complete 相同结构的 `{ assetId, sha256, sizeBytes }`。',
         '',
-        '**sha256 秒传**：同租户已存在未占用、未过期且内容一致（sha256 相同）的输入资产时直接复用并续期 `INPUT_RETENTION_DAYS`，跳过存储写入（`deduplicated: true`）。',
+        '**sha256 秒传**：同租户已存在未过期且内容一致（sha256 相同）的输入资产时直接复用并续期 `INPUT_RETENTION_DAYS`，跳过存储写入（`deduplicated: true`）。',
         '',
         '**SSRF 防护**：仅允许 http/https，私有/保留地址段拒绝（生产模式），重定向逐跳重新校验（最多 3 跳）。',
         '',
@@ -311,13 +311,13 @@ export async function assetsRoutes(app: FastifyInstance) {
 
     const digest = sha256(buf);
 
-    // sha256 秒传：同租户已有同内容、未占用、未过期的输入资产 → 续期复用
+    // sha256 秒传：同租户已有同内容、未过期的输入资产 → 续期复用
+    // （素材允许多任务共享，不排除已被回填 jobId 的资产——同图重导直接命中）
     const existing = await prisma.artifact.findFirst({
       where: {
         tenantId,
         kind: 'input',
         sha256: digest,
-        jobId: null,
         expiresAt: { gt: new Date() },
       },
       orderBy: { createdAt: 'desc' },

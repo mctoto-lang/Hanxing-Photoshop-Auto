@@ -234,13 +234,13 @@ export default fp(async (app) => {
         }
 
         // 限流校验
-        // P2-3 修复：未配置 rateLimitPerMin 时使用默认限流（60 req/min），
-        //   防止单个 API Key 无限调用打满后端
-        const DEFAULT_RATE_LIMIT_PER_MIN = 60;
+        // P2-3 修复：未配置 rateLimitPerMin 时使用全局默认限流（防止单个
+        //   API Key 无限调用打满后端）。默认值经 RATE_LIMIT_PER_MIN 环境变量
+        //   可配（服务端集成场景可上调），单个 Key 仍可按 Key 覆盖。
         const effectiveLimit =
           dbKey.rateLimitPerMin && dbKey.rateLimitPerMin > 0
             ? dbKey.rateLimitPerMin
-            : DEFAULT_RATE_LIMIT_PER_MIN;
+            : env.RATE_LIMIT_PER_MIN;
         const rl = checkRateLimit(dbKey.id, effectiveLimit);
         if (!rl.allowed) {
           reply.header('Retry-After', rl.retryAfterSec);

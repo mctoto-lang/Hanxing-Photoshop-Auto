@@ -317,7 +317,7 @@ export const adminPageHtml = `<!DOCTYPE html>
       <div class="modal-body">
         <div class="form-row"><label for="apiKeyFormName">名称 *</label><input id="apiKeyFormName" maxlength="100" placeholder="如：调用方A" /><div class="form-hint">1-100 字符</div></div>
         <div class="form-row"><label for="apiKeyFormPriority">优先级</label><input id="apiKeyFormPriority" type="number" min="1" max="10" value="5" /><div class="form-hint">1-10，数字越小优先级越高（默认 5）</div></div>
-        <div class="form-row"><label for="apiKeyFormRateLimit">每分钟限流次数</label><input id="apiKeyFormRateLimit" type="number" min="1" placeholder="留空不限制" /><div class="form-hint">留空表示不限制</div></div>
+        <div class="form-row"><label for="apiKeyFormRateLimit">每分钟限流次数</label><input id="apiKeyFormRateLimit" type="number" min="1" placeholder="留空使用全局默认" /><div class="form-hint">留空时使用全局默认限流（环境变量 RATE_LIMIT_PER_MIN，默认 60）</div></div>
         <div class="form-row"><label for="apiKeyFormQuota">每日配额次数</label><input id="apiKeyFormQuota" type="number" min="1" placeholder="留空不限制" /><div class="form-hint">留空表示不限制</div></div>
         <div class="form-row"><label for="apiKeyFormScopes">作用域</label><input id="apiKeyFormScopes" placeholder="逗号分隔，留空表示全部权限，如：jobs:create,jobs:read" /><div class="form-hint">逗号分隔，留空表示全部权限</div></div>
         <div class="form-row"><label for="apiKeyFormIpWhitelist">IP 白名单</label><input id="apiKeyFormIpWhitelist" placeholder="逗号分隔 CIDR 或 IP，留空不限制" /><div class="form-hint">逗号分隔 CIDR 或 IP，留空不限制</div></div>

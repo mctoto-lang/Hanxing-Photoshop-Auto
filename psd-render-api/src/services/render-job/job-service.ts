@@ -167,7 +167,8 @@ class RenderJobService {
         // 跨租户访问——不暴露"存在但无权"的信息，统一返回不存在
         throw Errors.invalidInputAsset(`资产 ${val.assetId} 不存在或非输入类型`);
       }
-      if (artifact.jobId) throw Errors.invalidInputAsset(`资产 ${val.assetId} 已被其他任务使用`);
+      // 输入素材允许多任务共享（批量替换的固定图被每个任务引用）：
+      //   不再按 jobId 排他；Worker 侧通过 inputJson 按 code 解析输入
       if (artifact.expiresAt < new Date()) {
         throw Errors.invalidInputAsset(`资产 ${val.assetId} 已过期`);
       }
@@ -251,26 +252,23 @@ class RenderJobService {
     // 循环正常结束意味着 job 必已赋值（最后一次迭代会 throw 而非 continue）
     if (!job) throw new Error('UNREACHABLE: 任务创建失败');
 
-    // 回填输入产物的 jobId
+    // 回填输入产物的 jobId（记账用：首个使用它的任务）
+    // 素材可共享：count=0（已被更早任务回填）不再视为错误
     // P2-7 修复：原循环串行 await N 次 SQL，改用 $transaction 一次性提交
     // N 个输入资产时减少 N-1 次 DB 往返
     if (inputArtifacts.length > 0) {
-      try {
-        const claimedArtifacts = await prisma.$transaction(
+      await prisma
+        .$transaction(
           inputArtifacts.map((a) =>
             prisma.artifact.updateMany({
               where: { id: a.artifactId, jobId: null },
               data: { jobId: job.id, bindingId: a.bindingId },
             }),
           ),
-        );
-        if (claimedArtifacts.some((result) => result.count !== 1)) {
-          throw Errors.invalidInputAsset('一个或多个输入资产已被其他任务使用');
-        }
-      } catch (error) {
-        await prisma.renderJob.delete({ where: { id: job.id } }).catch(() => {});
-        throw error;
-      }
+        )
+        .catch(() => {
+          // 回填失败不影响任务（记账字段，Worker 不依赖）
+        });
     }
 
     logger.info({
@@ -457,7 +455,6 @@ class RenderJobService {
       where: { id: jobId },
       include: {
         templateVersion: { include: { template: true } },
-        artifacts: { where: { kind: 'input' } },
       },
     });
     if (!job) throw Errors.workerNotFound('任务不存在');
@@ -476,6 +473,23 @@ class RenderJobService {
       .concat(fallbackFontVersionId)
       .filter((id): id is string => Boolean(id)))];
     const input: RenderJobInput = JSON.parse(job.inputJson);
+    // 输入素材按 inputJson 的 assetId code 解析：素材允许多任务共享（批量
+    // 替换的固定图），不再依赖 artifact.jobId 关系；缺任一 code 视为异常
+    const inputCodes = [
+      ...new Set(
+        Object.values(input)
+          .map((v) => v?.assetId)
+          .filter((c): c is string => Boolean(c)),
+      ),
+    ];
+    const inputArtifactRows = await prisma.artifact.findMany({
+      where: { code: { in: inputCodes }, tenantId: job.tenantId, kind: 'input' },
+    });
+    const artifactByCode = new Map(inputArtifactRows.map((a) => [a.code, a]));
+    const missingCodes = inputCodes.filter((c) => !artifactByCode.has(c));
+    if (missingCodes.length > 0) {
+      throw Errors.invalidInputAsset(`输入素材不存在或已清理: ${missingCodes.join(', ')}`);
+    }
     const output: RenderJobOutput = {
       format: job.outputFormat as 'png' | 'jpeg' | 'psd',
     };
@@ -492,20 +506,23 @@ class RenderJobService {
     //   不再嵌入 URL query string（避免进入 Nginx/Fastify 日志、Referer）
     const [artifacts, psdDl, fontList] = await Promise.all([
       Promise.all(
-        job.artifacts.map(async (a) => {
-          const dl = await storage.generateDownloadUrl({
-            objectKey: a.objectKey,
-            expiresInSec: urlTtl,
-          });
-          return {
-            bindingId: a.bindingId!,
-            objectKey: a.objectKey,
-            sha256: a.sha256,
-            mimeType: a.mimeType,
-            downloadUrl: dl.downloadUrl,
-            downloadToken: dl.downloadToken ?? '',
-          };
-        }),
+        Object.entries(input)
+          .filter(([, v]) => Boolean(v?.assetId))
+          .map(async ([bindingId, v]) => {
+            const a = artifactByCode.get(v.assetId!)!;
+            const dl = await storage.generateDownloadUrl({
+              objectKey: a.objectKey,
+              expiresInSec: urlTtl,
+            });
+            return {
+              bindingId,
+              objectKey: a.objectKey,
+              sha256: a.sha256,
+              mimeType: a.mimeType,
+              downloadUrl: dl.downloadUrl,
+              downloadToken: dl.downloadToken ?? '',
+            };
+          }),
       ),
       storage.generateDownloadUrl({
         objectKey: job.templateVersion.psdObjectKey,
