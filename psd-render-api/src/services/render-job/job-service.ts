@@ -311,7 +311,7 @@ class RenderJobService {
           index: number;
           ok: true;
           created: boolean;
-          jobCode: string;
+          jobId: string;
           status: string;
           idempotencyKey: string;
           createdAt: Date;
@@ -357,7 +357,9 @@ class RenderJobService {
           index: i,
           ok: true as const,
           created,
-          jobCode: job.code,
+          // 字段名与路由 response schema 对齐（jobId）：Fastify 序列化会剥掉
+          // schema 未声明的字段，返回 jobCode 会导致调用方拿不到任务编号
+          jobId: job.code,
           status: job.status,
           idempotencyKey,
           createdAt: job.createdAt,
