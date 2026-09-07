@@ -407,10 +407,11 @@ async function handleThumbnail(filePath: string, maxWidth: number): Promise<Buff
   await assertFileSize(filePath);
   const buf = await fs.readFile(filePath);
 
-  // 优先方案：用 ag-psd 同时读取合成图与 Resource 1036
-  //   1) 先试合成图（Image Data Section）— 分辨率高（如 1000×1000），缩放到 maxWidth 是下采样，画质好
-  //   2) 合成图近乎为空时（覆盖率 ≤ 0.2%，残缺/过时读取）回退到 Resource 1036
-  //      — Photoshop 保存时生成，始终代表完整画布的正确预览，但分辨率较低（通常 160×160），需放大
+  // 优先方案：用 ag-psd 同时读取 Resource 1036 与合成图
+  //   1) 先用 Resource 1036 — Photoshop 保存时生成，始终代表完整画布的正确预览
+  //      （分辨率较低，通常 160×160，需放大）
+  //   2) 无 1036 时回退合成图（Image Data Section）— 分辨率高（如 1000×1000），
+  //      但部分 PSD 该区域不完整/过时，解码出倾斜长方形等残缺内容
   const agPsdThumb = await generateThumbnailWithAgPsd(buf, maxWidth);
   if (agPsdThumb) return agPsdThumb;
 
@@ -443,12 +444,14 @@ async function handleThumbnail(filePath: string, maxWidth: number): Promise<Buff
 /**
  * 用 ag-psd 读取 PSD 并生成正方形缩略图。
  *
- * 策略（按画质从高到低）：
- *   1. 合成图（Image Data Section）— 原始分辨率，下采样画质最佳
- *      仅排除「近乎为空」的残缺/过时读取（覆盖率 ≤ 0.2%）；透明底样机
- *      （T恤/手机壳等）覆盖率天然偏低，透明区由白底 flatten 兜底
- *   2. Resource 1036（JPEG 缩略图）— Photoshop 保存时生成，始终正确
- *      但分辨率较低（通常 160×160），放大到 maxWidth 会有轻微模糊
+ * 策略（正确性优先）：
+ *   1. Resource 1036（JPEG 缩略图）— Photoshop 保存时生成，始终代表完整画布的
+ *      正确预览。分辨率较低（通常 160×160），放大到 maxWidth 略软，但模板卡片
+ *      显示尺寸小，画质损失可接受
+ *   2. 合成图（Image Data Section）回退 — 仅当 PSD 无 1036 时使用（如非
+ *      Photoshop 保存的 PSD）。部分 PSD 该区域不完整/过时，解码出的像素行错位
+ *      形成倾斜长方形 + 大面积透明（无法与透明底样机的低覆盖率可靠区分），
+ *      因此不作为首选来源
  *
  * @returns PNG Buffer；若两条路径都失败返回 null
  */
@@ -456,12 +459,22 @@ async function generateThumbnailWithAgPsd(psdBuffer: Buffer, maxWidth: number): 
   try {
     initAgPsdCanvas();
     const psd = readPsd(psdBuffer, {
-      skipCompositeImageData: false, // 读取合成图（高分辨率）
+      skipCompositeImageData: false, // 读取合成图（回退来源）
       skipLayerImageData: true,
     });
 
-    // 方案1：合成图（psd.canvas）— 透明背景样机（T恤/手机壳等）不透明覆盖率
-    // 天然偏低，仅要求「存在内容」（>0.2%，排除仅剩一条像素带的残缺读取）；
+    // 方案1：Resource 1036（imageResources.thumbnail）— 始终正确，优先采用
+    const thumb = (psd as any).imageResources?.thumbnail;
+    if (thumb && thumb.width && thumb.height) {
+      const ctx = thumb.getContext('2d');
+      const imgData = ctx?.getImageData?.();
+      if (imgData && imgData.data && imgData.data.length > 0) {
+        return await resizeToSquareThumbnail(imgData, maxWidth);
+      }
+    }
+
+    // 方案2：合成图（psd.canvas）— 无 1036 时的回退；仅要求「存在内容」
+    // （覆盖率 >0.2%），透明底样机（T恤/手机壳等）覆盖率天然偏低，
     // 透明区由 resizeToSquareThumbnail 的白底 flatten 兜底，不丢内容
     const compositeCanvas = (psd as any).canvas;
     if (compositeCanvas) {
@@ -472,16 +485,6 @@ async function generateThumbnailWithAgPsd(psdBuffer: Buffer, maxWidth: number): 
         if (coverage > 0.002) {
           return await resizeToSquareThumbnail(imgData, maxWidth);
         }
-      }
-    }
-
-    // 方案2：Resource 1036（imageResources.thumbnail）— 始终正确，允许放大
-    const thumb = (psd as any).imageResources?.thumbnail;
-    if (thumb && thumb.width && thumb.height) {
-      const ctx = thumb.getContext('2d');
-      const imgData = ctx?.getImageData?.();
-      if (imgData && imgData.data && imgData.data.length > 0) {
-        return await resizeToSquareThumbnail(imgData, maxWidth);
       }
     }
 
