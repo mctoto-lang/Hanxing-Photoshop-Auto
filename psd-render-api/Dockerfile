@@ -22,7 +22,9 @@
 #   - 基础镜像可通过 NODE_IMAGE 指向企业 Harbor、ACR 或 TCR 缓存
 
 # ============== Stage 1: builder ==============
-ARG NODE_IMAGE=node:20-bookworm-slim
+# node:22 而非 node:20：pnpm@11 要求 node >= 22.13（ERR_UNKNOWN_BUILTIN_MODULE），
+# 与开发环境（Node 22 + pnpm 11）工具链对齐；应用 engines 声明 node >= 20 兼容
+ARG NODE_IMAGE=node:22-bookworm-slim
 FROM ${NODE_IMAGE} AS builder
 
 WORKDIR /app
@@ -48,30 +50,41 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #     新版 npm(10.x+)不再接受 `npm config set prisma_engines_mirror` 命令
 RUN npm config set registry https://registry.npmmirror.com
 
+# 安装 pnpm（与开发环境大版本一致，pnpm-lock.yaml 为 lockfileVersion 9.0）
+RUN npm install -g pnpm@11
+
+# pnpm 的包下载走国内镜像（npm_config_* 环境变量对 pnpm 生效；
+# 不用 `pnpm config set`：检测到 pnpm-workspace.yaml 时会写入该文件污染构建上下文）
+ENV npm_config_registry=https://registry.npmmirror.com
+
 # Prisma 引擎二进制镜像(npmmirror 淘宝镜像)
-# 提前到 npm ci 之前:@prisma/client 的 postinstall 脚本会下载引擎,
+# 提前到 pnpm install 之前:@prisma/client 的 postinstall 脚本会下载引擎,
 # 必须在此之前生效,否则会走默认国外源导致国内构建超时
 ENV PRISMA_ENGINES_MIRROR=https://registry.npmmirror.com/-/binary/prisma
 
-# 先复制 package*.json 利用 Docker 层缓存
-# 强制要求 package-lock.json 必须存在（去掉通配符），保证可重现构建
-COPY package.json package-lock.json ./
+# 先复制依赖清单利用 Docker 层缓存
+# 强制要求 pnpm-lock.yaml / pnpm-workspace.yaml 必须存在（去掉通配符），保证可重现构建
+# pnpm-workspace.yaml 承载 allowBuilds（sharp/prisma/esbuild 原生构建白名单）
+# 与 nodeLinker: hoisted（npm 式平铺布局，符号链接布局下 @prisma/client
+# 会解析到虚拟商店的 .prisma stub，导致类型退化为 any、运行时抛错）
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY prisma ./prisma
 COPY scripts ./scripts
 
 # 安装全部依赖（含 devDependencies，用于编译）
-# 仅使用 npm ci 保证可重现构建，移除 npm install fallback 避免静默回退掩盖问题
-RUN npm ci --no-audit --no-fund
+# 仅使用 --frozen-lockfile 保证可重现构建，禁止静默改写锁文件
+# postinstall 钩子自动执行 prisma generate（prisma/ 已复制、PRISMA_ENGINES_MIRROR 已生效）
+RUN pnpm install --frozen-lockfile
 
 # 第三期改造：schema.prisma 默认就是 SQLite 版本，无需切换
 # 复制源码并编译
 COPY tsconfig.json ./
 COPY src ./src
 
-RUN npm run build
+RUN pnpm run build
 
 # 生成 Prisma Client（基于 SQLite schema）
-# PRISMA_ENGINES_MIRROR 已在上方设置,确保引擎从国内镜像下载
+# postinstall 已生成过，此处幂等执行兜底；PRISMA_ENGINES_MIRROR 已在上方设置
 RUN ./node_modules/.bin/prisma generate
 
 # ============== Stage 2: runner ==============
@@ -90,7 +103,7 @@ RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors
     || { echo '❌ apt 源替换失败：未检测到 mirrors.aliyun.com，请检查 Debian 版本与 sources 文件结构'; exit 1; }
 
 # 运行时依赖：sharp 在 bookworm-slim 上需要 libvips
-# 注：node 20 slim 镜像通常已预装 libvips，若缺可显式安装
+# 注：node 22 slim 镜像通常已预装 libvips，若缺可显式安装
 # SQLite 是 Node 内置模块 better-sqlite3 的替代，Prisma 用 @prisma/client 自带驱动，
 # 不需要额外系统依赖；openssl 保留用于加密相关操作
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -102,24 +115,33 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN groupadd --system --gid 1001 psd \
     && useradd --system --uid 1001 --gid psd --no-create-home --home-dir /app --shell /usr/sbin/nologin psd
 
-# 配置 npm 国内镜像源（runner 阶段独立配置）
-RUN npm config set registry https://registry.npmmirror.com
+# 配置 npm 国内镜像源 + 安装 pnpm（runner 阶段独立配置）
+RUN npm config set registry https://registry.npmmirror.com \
+    && npm install -g pnpm@11
 
-# Prisma 引擎二进制镜像(同 builder 阶段)
-# runner 阶段 npm ci --omit=dev 安装 @prisma/client 时会触发 postinstall 下载引擎,
+# pnpm 包下载走国内镜像（同 builder 阶段）
+ENV npm_config_registry=https://registry.npmmirror.com
+
+# Prisma 引擎镜像(同 builder 阶段)
+# runner 阶段 pnpm install --prod 安装 @prisma/client 时会触发 postinstall 下载引擎,
 # 必须配置镜像源,否则走默认国外源易超时/ECONNRESET
 ENV PRISMA_ENGINES_MIRROR=https://registry.npmmirror.com/-/binary/prisma
 
-# 仅复制生产依赖
-# 强制要求 package-lock.json 必须存在
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --no-audit --no-fund
+# 仅复制生产依赖清单
+# 强制要求 pnpm-lock.yaml / pnpm-workspace.yaml 必须存在
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+# prisma/ 必须在安装前复制：根 postinstall 钩子（prisma generate）需要 schema
+COPY prisma ./prisma
 
-# 复制构建产物与 Prisma schema
+# 仅安装生产依赖
+# prisma CLI 位于 dependencies（启动命令 migrate deploy 需要），--prod 会保留；
+# nodeLinker: hoisted 使 node_modules 为平铺真实目录，跨 stage 复制安全
+RUN pnpm install --frozen-lockfile --prod
+
+# 复制构建产物
 COPY --from=builder /app/dist ./dist
-# Prisma Client（@prisma/client 是 prod 依赖会自动安装；这里补充生成产物）
-COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
-# 从 builder 复制 prisma 目录（schema.prisma + migrations/）
+# 从 builder 复制 prisma 目录（schema.prisma + migrations/，migrate deploy 需要）
+# Prisma Client 由上方 postinstall 在本 stage 自行生成（引擎二进制随生成产物落盘）
 COPY --from=builder /app/prisma ./prisma
 
 # 第三期改造：创建 SQLite 数据目录 /data（与 docker-compose 卷挂载点对应）
