@@ -5,6 +5,7 @@
  * POST /v1/templates               触发 PSD 解析，返回图层树
  * PUT  /v1/templates/:id/layer-bindings  保存图层绑定配置
  * POST /v1/templates/:id/publish   发布模板版本
+ * POST /v1/templates/:id/delete    删除模板（软删除；已发布自动先归档）
  * GET  /v1/templates               模板列表
  * GET  /v1/templates/:id           模板详情（含图层树、绑定）
  */
@@ -351,7 +352,7 @@ export async function templateRoutes(app: FastifyInstance) {
               type: 'array',
               items: {
                 type: 'object',
-                required: ['templateId', 'code', 'name', 'status', 'statusLabel', 'latestVersion', 'published', 'thumbnailObjectKey', 'createdAt'],
+                required: ['templateId', 'code', 'name', 'status', 'statusLabel', 'latestVersion', 'published', 'thumbnailObjectKey', 'thumbnailUrl', 'createdAt'],
                 properties: {
                   templateId: { type: 'string', description: '模板 ID（tpl_xxx）' },
                   code: { type: 'string', description: '模板编码' },
@@ -361,6 +362,7 @@ export async function templateRoutes(app: FastifyInstance) {
                   latestVersion: { type: 'integer', description: '最新版本号（从 1 起，无版本时为 0）' },
                   published: { type: 'boolean', description: '最新版本是否已发布' },
                   thumbnailObjectKey: { type: 'string', nullable: true, description: '缩略图对象 key（无缩略图时为 null）' },
+                  thumbnailUrl: { type: 'string', nullable: true, description: '缩略图预签名直链（浏览器 <img> 直接加载，默认 1 小时有效；local 模式为相对地址 /storage/thumb?...，由调用方拼接自身基址；无缩略图或签名失败时为 null，调用方可回退 GET /v1/templates/:id/thumbnail 鉴权代理）' },
                   ownerUserId: { type: 'string', nullable: true, description: '归属用户（X-User-Id 透传；null=平台共享）' },
                   visibility: { type: 'string', enum: ['public', 'private'], description: '可见性：public=企业内 / private=仅归属人、企业管理员、平台超管' },
                   createdAt: { type: 'string', format: 'date-time', description: '模板创建时间' },
@@ -571,6 +573,110 @@ export async function templateRoutes(app: FastifyInstance) {
     const result = await templateService.regenerateThumbnail(
       templateId,
       tenantId,
+      templateViewerFrom(req.user),
+    );
+    return reply.send(result);
+  });
+
+  // 删除模板（软删除；已发布自动先归档，单次调用完成）
+  app.post('/v1/templates/:id/delete', {
+    preHandler: [app.authenticateApiKey],
+    schema: {
+      tags: ['templates'],
+      summary: '删除模板',
+      description:
+        '软删除模板（状态置为 DELETED，列表不再显示）。仅模板归属人（X-User-Id）或企业管理员（X-User-Admin）可删除，无论公开/私有。' +
+        '已发布（PUBLISHED）模板自动先归档再删除。无关联渲染任务时同步清理存储中的 PSD 与缩略图文件，否则保留给在途任务，由后台清理器善后。',
+      security: [{ apiKey: [] }],
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: { id: { type: 'string', description: '模板 ID（tpl_xxx）' } },
+      },
+      response: {
+        200: {
+          type: 'object',
+          required: ['templateId', 'status', 'storagePurged'],
+          properties: {
+            templateId: { type: 'string' },
+            status: { type: 'string', description: '固定为 DELETED' },
+            storagePurged: {
+              type: 'boolean',
+              description: '是否已同步清理存储文件（false=有关联任务，文件延后清理）',
+            },
+          },
+        },
+        401: { $ref: 'ErrorResponse#' },
+        403: { $ref: 'ErrorResponse#', description: '非归属人且非企业管理员' },
+        404: { $ref: 'ErrorResponse#' },
+        429: { $ref: 'ErrorResponse#' },
+      },
+    },
+  }, async (req, reply) => {
+    const templateId = (req.params as any).id as string;
+    const tenantId = req.user?.tenantId;
+    if (!tenantId) {
+      return reply.code(401).send({ error: 'UNAUTHORIZED', message: 'API Key 缺少 tenantId' });
+    }
+    const result = await templateService.deleteForTenant(
+      templateId,
+      tenantId,
+      templateViewerFrom(req.user),
+    );
+    return reply.send(result);
+  });
+
+  // 修改模板可见性
+  app.post('/v1/templates/:id/visibility', {
+    preHandler: [app.authenticateApiKey],
+    schema: {
+      tags: ['templates'],
+      summary: '修改模板可见性',
+      description:
+        '修改模板可见性：public=企业内可见可渲染 / private=仅归属人、企业管理员可见。' +
+        '仅模板归属人（X-User-Id）或企业管理员（X-User-Admin）可修改。',
+      security: [{ apiKey: [] }],
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: { id: { type: 'string', description: '模板 ID' } },
+      },
+      body: {
+        type: 'object',
+        required: ['visibility'],
+        properties: {
+          visibility: { type: 'string', enum: ['public', 'private'] },
+        },
+      },
+      response: {
+        200: {
+          type: 'object',
+          required: ['templateId', 'visibility'],
+          properties: {
+            templateId: { type: 'string' },
+            visibility: { type: 'string', enum: ['public', 'private'] },
+          },
+        },
+        401: { $ref: 'ErrorResponse#' },
+        403: { $ref: 'ErrorResponse#', description: '非归属人且非企业管理员' },
+        404: { $ref: 'ErrorResponse#' },
+        429: { $ref: 'ErrorResponse#' },
+      },
+    },
+  }, async (req, reply) => {
+    const templateId = (req.params as any).id as string;
+    const tenantId = req.user?.tenantId;
+    if (!tenantId) {
+      return reply.code(401).send({ error: 'UNAUTHORIZED', message: 'API Key 缺少 tenantId' });
+    }
+    const body = (req.body ?? {}) as { visibility?: string };
+    if (body.visibility !== 'public' && body.visibility !== 'private') {
+      return reply.code(400).send({ error: 'VALIDATION_ERROR', message: 'visibility 仅支持 public / private' });
+    }
+    const result = await templateService.updateVisibilityForTenant(
+      templateId,
+      tenantId,
+      body.visibility,
       templateViewerFrom(req.user),
     );
     return reply.send(result);

@@ -34,6 +34,12 @@
         "name": "Authorization",
         "description": "存储签名令牌（格式：Bearer <token>，由 generateUploadUrl/generateDownloadUrl 签发，仅 local 模式可用。仅接受 Authorization 头传递，不支持 query 参数）"
       },
+      "storageSignedUrl": {
+        "type": "apiKey",
+        "in": "query",
+        "name": "sig",
+        "description": "缩略图签名直链（key + exp + sig 三个查询参数联合 HMAC 签名，由 GET /v1/templates 列表的 thumbnailUrl 字段签发，默认 1 小时有效；仅限 thumbnails/ 前缀对象，仅 local 模式）"
+      },
       "workerRegisterSecret": {
         "type": "apiKey",
         "in": "header",
@@ -449,6 +455,87 @@
         }
       }
     },
+    "/storage/thumb": {
+      "get": {
+        "summary": "缩略图直链（local 模式专用）",
+        "tags": [
+          "storage"
+        ],
+        "description": "模板缩略图直连加载端点：签名参数直接附在 URL 上（<img> 标签无法携带 Authorization 头，\n故对低敏感的缩略图单独放开 query 签名），严格限定 `thumbnails/` 前缀对象，不触及 PSD/输入资产。\n签名由 `GET /v1/templates` 列表接口随 `thumbnailUrl` 字段签发（默认 1 小时有效）。\n\n**注意**：此端点仅 `STORAGE_BACKEND=local` 时可用；COS 模式列表直接返回 COS 签名地址。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "query",
+            "name": "key",
+            "required": true,
+            "description": "对象键（必须以 thumbnails/ 开头）"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "query",
+            "name": "exp",
+            "required": true,
+            "description": "过期时间（毫秒时间戳）"
+          }
+        ],
+        "security": [
+          {
+            "storageSignedUrl": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "缩略图二进制流（Content-Type 为图片实际 MIME 类型）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary",
+                  "description": "缩略图二进制流（Content-Type 为图片实际 MIME 类型）"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "缺少参数或非 local 模式",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "缺少参数或非 local 模式"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "签名无效或已过期",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "签名无效或已过期"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "文件不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "文件不存在"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/assets/upload-url": {
       "post": {
         "summary": "获取资产上传地址",
@@ -593,7 +680,7 @@
         "tags": [
           "assets"
         ],
-        "description": "客户端通过 `POST /v1/assets/upload-url` 拿到预签名地址并 PUT 上传完成后，调用本接口回填实际 sha256/sizeBytes/mime。\n\n服务端会校验：\n- 资产存在且属于当前租户（jobId 为 null，即未被任何任务占用）\n- 存储中对象已存在（HEAD 检查）\n- 大小不超过 `MAX_INPUT_SIZE_MB`\n\n校验通过后将资产标记为可用，提交渲染任务时即可在 `input.{bindingId}.assetId` 引用。\n\n注意：资产不存在 / 未上传完成 / 大小超限 / 已被其他任务使用 等情况均统一返回 422 `INVALID_INPUT_ASSET`，详见各响应描述。",
+        "description": "客户端通过 `POST /v1/assets/upload-url` 拿到预签名地址并 PUT 上传完成后，调用本接口回填实际 sha256/sizeBytes/mime。\n\n服务端会校验：\n- 资产存在且属于当前租户（素材可被多任务共享）\n- 存储中对象已存在（HEAD 检查）\n- 大小不超过 `MAX_INPUT_SIZE_MB`\n\n校验通过后将资产标记为可用，提交渲染任务时即可在 `input.{bindingId}.assetId` 引用。\n\n注意：资产不存在 / 未上传完成 / 大小超限 等情况均统一返回 422 `INVALID_INPUT_ASSET`，详见各响应描述。",
         "parameters": [
           {
             "schema": {
@@ -675,12 +762,12 @@
             }
           },
           "422": {
-            "description": "INVALID_INPUT_ASSET：资产不存在/不属于当前租户/未上传完成/大小不符限制/已被其他任务使用",
+            "description": "INVALID_INPUT_ASSET：资产不存在/不属于当前租户/未上传完成/大小不符限制",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/def-0",
-                  "description": "INVALID_INPUT_ASSET：资产不存在/不属于当前租户/未上传完成/大小不符限制/已被其他任务使用"
+                  "description": "INVALID_INPUT_ASSET：资产不存在/不属于当前租户/未上传完成/大小不符限制"
                 }
               }
             }
@@ -705,7 +792,7 @@
         "tags": [
           "assets"
         ],
-        "description": "服务端按 URL 拉取图片并登记为输入资产，返回与 upload-url + complete 相同结构的 `{ assetId, sha256, sizeBytes }`。\n\n**sha256 秒传**：同租户已存在未占用、未过期且内容一致（sha256 相同）的输入资产时直接复用并续期 `INPUT_RETENTION_DAYS`，跳过存储写入（`deduplicated: true`）。\n\n**SSRF 防护**：仅允许 http/https，私有/保留地址段拒绝（生产模式），重定向逐跳重新校验（最多 3 跳）。\n\n限制：仅 JPG/PNG/JPEG，单张 ≤ 150MB，下载超时 60s。",
+        "description": "服务端按 URL 拉取图片并登记为输入资产，返回与 upload-url + complete 相同结构的 `{ assetId, sha256, sizeBytes }`。\n\n**sha256 秒传**：同租户已存在未过期且内容一致（sha256 相同）的输入资产时直接复用并续期 `INPUT_RETENTION_DAYS`，跳过存储写入（`deduplicated: true`）。\n\n**SSRF 防护**：仅允许 http/https，私有/保留地址段拒绝（生产模式），重定向逐跳重新校验（最多 3 跳）。\n\n限制：仅 JPG/PNG/JPEG，单张 ≤ 150MB，下载超时 60s。",
         "requestBody": {
           "content": {
             "application/json": {
@@ -1153,6 +1240,7 @@
                           "latestVersion",
                           "published",
                           "thumbnailObjectKey",
+                          "thumbnailUrl",
                           "createdAt"
                         ],
                         "properties": {
@@ -1188,6 +1276,11 @@
                             "type": "string",
                             "nullable": true,
                             "description": "缩略图对象 key（无缩略图时为 null）"
+                          },
+                          "thumbnailUrl": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "缩略图预签名直链（浏览器 <img> 直接加载，默认 1 小时有效；local 模式为相对地址 /storage/thumb?...，由调用方拼接自身基址；无缩略图或签名失败时为 null，调用方可回退 GET /v1/templates/:id/thumbnail 鉴权代理）"
                           },
                           "ownerUserId": {
                             "type": "string",
@@ -1895,6 +1988,218 @@
                 "schema": {
                   "$ref": "#/components/schemas/def-0",
                   "description": "非公开模板无权操作"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/templates/{id}/delete": {
+      "post": {
+        "summary": "删除模板",
+        "tags": [
+          "templates"
+        ],
+        "description": "软删除模板（状态置为 DELETED，列表不再显示）。仅模板归属人（X-User-Id）或企业管理员（X-User-Admin）可删除，无论公开/私有。已发布（PUBLISHED）模板自动先归档再删除。无关联渲染任务时同步清理存储中的 PSD 与缩略图文件，否则保留给在途任务，由后台清理器善后。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "description": "模板 ID（tpl_xxx）"
+          }
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "templateId",
+                    "status",
+                    "storagePurged"
+                  ],
+                  "properties": {
+                    "templateId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "description": "固定为 DELETED"
+                    },
+                    "storagePurged": {
+                      "type": "boolean",
+                      "description": "是否已同步清理存储文件（false=有关联任务，文件延后清理）"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "非归属人且非企业管理员",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "非归属人且非企业管理员"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/templates/{id}/visibility": {
+      "post": {
+        "summary": "修改模板可见性",
+        "tags": [
+          "templates"
+        ],
+        "description": "修改模板可见性：public=企业内可见可渲染 / private=仅归属人、企业管理员可见。仅模板归属人（X-User-Id）或企业管理员（X-User-Admin）可修改。",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "visibility"
+                ],
+                "properties": {
+                  "visibility": {
+                    "type": "string",
+                    "enum": [
+                      "public",
+                      "private"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "description": "模板 ID"
+          }
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "templateId",
+                    "visibility"
+                  ],
+                  "properties": {
+                    "templateId": {
+                      "type": "string"
+                    },
+                    "visibility": {
+                      "type": "string",
+                      "enum": [
+                        "public",
+                        "private"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "非归属人且非企业管理员",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "非归属人且非企业管理员"
                 }
               }
             }
@@ -2797,6 +3102,206 @@
                 "schema": {
                   "$ref": "#/components/schemas/def-0",
                   "description": "触发限流或日配额耗尽"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/fonts": {
+      "get": {
+        "summary": "字体列表",
+        "tags": [
+          "fonts"
+        ],
+        "description": "返回全局字体库中所有已发布字体。字体不按租户隔离（多企业共享），用于文字图层绑定选择 defaultFontVersionId。",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "fonts"
+                  ],
+                  "properties": {
+                    "fonts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "fontId",
+                          "familyName",
+                          "postscriptName",
+                          "style",
+                          "createdAt"
+                        ],
+                        "properties": {
+                          "fontId": {
+                            "type": "string",
+                            "description": "字体版本 ID（绑定 defaultFontVersionId 用）"
+                          },
+                          "familyName": {
+                            "type": "string",
+                            "description": "字体家族名"
+                          },
+                          "postscriptName": {
+                            "type": "string",
+                            "description": "PostScript 名称"
+                          },
+                          "style": {
+                            "type": "string",
+                            "description": "字体样式（Regular / Bold 等）"
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "上传时间"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/fonts/upload": {
+      "post": {
+        "summary": "上传字体",
+        "tags": [
+          "fonts"
+        ],
+        "description": "上传字体文件并注册到全局字体库（立即安装到 API 服务器本机，Worker 经 manifest 同步）。请求体为原始字体二进制。仅支持 .ttf / .otf / .ttc，单文件 ≤50MB。上传后自动发布，可用于文字图层绑定。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "query",
+            "name": "fileName",
+            "required": true,
+            "description": "字体文件名（含 .otf / .ttf / .ttc 扩展名）"
+          }
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "fontId",
+                    "familyName",
+                    "postscriptName",
+                    "style",
+                    "published",
+                    "installed"
+                  ],
+                  "properties": {
+                    "fontId": {
+                      "type": "string",
+                      "description": "字体版本 ID"
+                    },
+                    "familyName": {
+                      "type": "string"
+                    },
+                    "postscriptName": {
+                      "type": "string"
+                    },
+                    "style": {
+                      "type": "string"
+                    },
+                    "published": {
+                      "type": "boolean",
+                      "description": "是否已发布"
+                    },
+                    "installed": {
+                      "type": "boolean",
+                      "description": "是否已安装到 API 服务器系统"
+                    },
+                    "installMessage": {
+                      "type": "string",
+                      "description": "安装失败原因（installed=false 时）"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "格式不支持 / 超过 50MB / 字体解析失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0",
+                  "description": "格式不支持 / 超过 50MB / 字体解析失败"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/def-0"
                 }
               }
             }
@@ -8153,7 +8658,7 @@
         "tags": [
           "admin-jobs"
         ],
-        "description": "删除所有已完成（SUCCEEDED/FAILED/CANCELLED）的任务记录，同时清理关联的心跳和产物记录。进行中的任务不受影响。operator 及以上可调用。",
+        "description": "删除所有已完成（SUCCEEDED/FAILED/CANCELLED）的任务记录，同时清理关联的心跳记录（输入素材可多任务共享，不随任务删除，由过期清理器按保留期回收）。进行中的任务不受影响。operator 及以上可调用。",
         "security": [
           {
             "adminSession": []
@@ -8526,7 +9031,7 @@
                     "type": "integer",
                     "minimum": 1,
                     "nullable": true,
-                    "description": "每分钟限流（null 表示不限流）"
+                    "description": "每分钟限流（null 表示使用全局默认 RATE_LIMIT_PER_MIN）"
                   },
                   "quotaPerDay": {
                     "type": "integer",

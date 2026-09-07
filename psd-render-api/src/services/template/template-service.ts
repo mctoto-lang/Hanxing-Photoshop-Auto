@@ -580,19 +580,42 @@ class TemplateService {
       orderBy: { createdAt: 'desc' },
       include: { versions: { orderBy: { version: 'desc' }, take: 1 } },
     });
-    return templates.map((t) => ({
-      templateId: t.id,
-      code: t.code,
-      name: t.name,
-      status: t.status,
-      statusLabel: getTemplateDisplayStatus(t.status, t.versions[0]?.published ?? false),
-      ownerUserId: t.ownerUserId ?? null,
-      visibility: t.visibility === 'private' ? 'private' : 'public',
-      latestVersion: t.versions[0]?.version ?? 0,
-      published: t.versions[0]?.published ?? false,
-      thumbnailObjectKey: t.versions[0]?.thumbnailObjectKey ?? null,
-      createdAt: t.createdAt,
-    }));
+    // 缩略图直链（<img> 直接加载，免每张图走鉴权代理回源）：
+    // 签名为纯本地计算（COS getObjectUrl / HMAC），按模板量级无成本；
+    // 仅对有权看到该模板的查看者签发（列表已按可见性过滤）
+    const storage = await getStorage();
+    return Promise.all(
+      templates.map(async (t) => {
+        const thumbnailObjectKey = t.versions[0]?.thumbnailObjectKey ?? null;
+        let thumbnailUrl: string | null = null;
+        if (thumbnailObjectKey) {
+          try {
+            thumbnailUrl = (
+              await storage.generateThumbUrl({
+                objectKey: thumbnailObjectKey,
+                expiresInSec: 3600,
+              })
+            ).url;
+          } catch {
+            // 单个签名失败不拖垮列表，调用方回退鉴权代理拉取
+          }
+        }
+        return {
+          templateId: t.id,
+          code: t.code,
+          name: t.name,
+          status: t.status,
+          statusLabel: getTemplateDisplayStatus(t.status, t.versions[0]?.published ?? false),
+          ownerUserId: t.ownerUserId ?? null,
+          visibility: t.visibility === 'private' ? 'private' : 'public',
+          latestVersion: t.versions[0]?.version ?? 0,
+          published: t.versions[0]?.published ?? false,
+          thumbnailObjectKey,
+          thumbnailUrl,
+          createdAt: t.createdAt,
+        };
+      }),
+    );
   }
 
   /**
@@ -793,6 +816,67 @@ class TemplateService {
     }
     logger.info({ templateId, code: t.code, msg: '模板已软删除' });
     return { templateId, status: 'DELETED', storagePurged: jobCount === 0 };
+  }
+
+  /**
+   * 租户侧删除（POST /v1/templates/:id/delete）
+   * 权限比编辑更严：无论公开/私有，仅模板归属人本人或企业管理员可删
+   * （公开模板允许任意成员编辑绑定，但不能被任意成员删除）。
+   * 已发布（PUBLISHED）模板自动先归档再软删除，单次调用完成。
+   */
+  async deleteForTenant(
+    templateId: string,
+    tenantId: string,
+    viewer: { userId?: string; userAdmin: boolean } | undefined,
+  ): Promise<{ templateId: string; status: string; storagePurged: boolean }> {
+    const t = await prisma.template.findFirst({
+      where: { id: templateId, tenantId },
+    });
+    if (!t || t.status === 'DELETED') throw Errors.notFound('模板不存在');
+
+    if (!viewer?.userAdmin) {
+      const isOwner = !!viewer?.userId && t.ownerUserId === viewer.userId;
+      if (!isOwner) throw Errors.forbidden('仅模板归属人或企业管理员可删除模板');
+    }
+
+    if (t.status === 'PUBLISHED') {
+      await this.archive(templateId);
+    }
+    return await this.softDelete(templateId);
+  }
+
+  /**
+   * 租户侧修改可见性（POST /v1/templates/:id/visibility）
+   * 与删除同权限：仅模板归属人或企业管理员（编辑绑定对公开模板较宽松，
+   * 但可见性影响整个企业谁能用该模板，收紧到归属人/管理员）。
+   */
+  async updateVisibilityForTenant(
+    templateId: string,
+    tenantId: string,
+    visibility: 'public' | 'private',
+    viewer: { userId?: string; userAdmin: boolean } | undefined,
+  ): Promise<{ templateId: string; visibility: 'public' | 'private' }> {
+    const normalized = visibility === 'private' ? 'private' : 'public';
+    const t = await prisma.template.findFirst({
+      where: { id: templateId, tenantId },
+    });
+    if (!t || t.status === 'DELETED') throw Errors.notFound('模板不存在');
+
+    if (!viewer?.userAdmin) {
+      const isOwner = !!viewer?.userId && t.ownerUserId === viewer.userId;
+      if (!isOwner) throw Errors.forbidden('仅模板归属人或企业管理员可修改可见性');
+    }
+
+    if (t.visibility === normalized) {
+      return { templateId, visibility: normalized };
+    }
+
+    await prisma.template.update({
+      where: { id: templateId },
+      data: { visibility: normalized },
+    });
+    logger.info({ templateId, code: t.code, visibility: normalized, msg: '模板可见性已更新' });
+    return { templateId, visibility: normalized };
   }
 
   private flatten(nodes: LayerNode[]): LayerNode[] {

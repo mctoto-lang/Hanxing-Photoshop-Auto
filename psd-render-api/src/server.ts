@@ -26,6 +26,7 @@ import { storageRoutes } from './routes/storage.js';
 import { assetsRoutes } from './routes/v1/assets.js';
 import { templateRoutes } from './routes/v1/templates.js';
 import { renderJobRoutes } from './routes/v1/render-jobs.js';
+import { fontRoutes } from './routes/v1/fonts.js';
 import { workerRoutes } from './routes/internal/workers.js';
 import { jobInternalRoutes } from './routes/internal/jobs.js';
 import { fontInternalRoutes } from './routes/internal/fonts.js';
@@ -113,6 +114,7 @@ async function buildServer(): Promise<FastifyInstance> {
   await app.register(assetsRoutes, { prefix: '' });
   await app.register(templateRoutes, { prefix: '' });
   await app.register(renderJobRoutes, { prefix: '' });
+  await app.register(fontRoutes, { prefix: '' });
   await app.register(workerRoutes, { prefix: '' });
   await app.register(jobInternalRoutes, { prefix: '' });
   await app.register(fontInternalRoutes, { prefix: '' });

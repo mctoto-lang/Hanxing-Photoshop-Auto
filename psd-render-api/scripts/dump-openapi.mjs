@@ -2,7 +2,7 @@
 // Usage: node scripts/dump-openapi.mjs
 import { writeFileSync } from 'node:fs';
 
-const BASE = 'http://127.0.0.1:3000';
+const BASE = process.env.OPENAPI_BASE ?? 'http://127.0.0.1:3000';
 
 async function waitForServer(timeoutMs = 30000) {
   const start = Date.now();
