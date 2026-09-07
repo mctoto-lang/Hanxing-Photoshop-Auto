@@ -36,6 +36,13 @@ export interface ObjectMeta {
   sha256?: string;
 }
 
+/** 缩略图直链结果（浏览器 <img> 直接加载，签名即鉴权） */
+export interface ThumbUrlResult {
+  /** 可直接给浏览器加载的 URL（COS=SDK 签名绝对地址；local=/storage/thumb 相对地址，调用方按自身外部基址拼接） */
+  url: string;
+  expiresAt: string;
+}
+
 export interface StorageService {
   /** 生成上传预签名 URL（或 local 模式的上传地址 + 令牌） */
   generateUploadUrl(opts: {
@@ -57,6 +64,20 @@ export interface StorageService {
     objectKey: string;
     expiresInSec?: number;
   }): Promise<DownloadUrlResult>;
+
+  /**
+   * 生成缩略图直链（浏览器 <img> 直接加载）。
+   * 仅允许 thumbnails/ 前缀对象；COS 返回 SDK 签名地址，local 返回
+   * /storage/thumb?key&exp&sig 查询签名地址（下载令牌走 Authorization 头，
+   * <img> 带不了，故缩略图单独放开 query 签名，范围限定小预览图）。
+   */
+  generateThumbUrl(opts: {
+    objectKey: string;
+    expiresInSec?: number;
+  }): Promise<ThumbUrlResult>;
+
+  /** 校验缩略图直链签名参数（local 模式路由层用） */
+  verifyThumbParams(objectKey: string, exp: string, sig: string): boolean;
 
   /** 直接读取对象内容（后端内部使用，如下载 PSD 解析） */
   getObject(objectKey: string): Promise<Buffer>;

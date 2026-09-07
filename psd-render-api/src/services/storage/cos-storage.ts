@@ -20,6 +20,7 @@ import type {
   StorageService,
   UploadUrlResult,
   DownloadUrlResult,
+  ThumbUrlResult,
   ObjectMeta,
 } from './storage.js';
 
@@ -210,6 +211,35 @@ export class CosStorageService implements StorageService {
       downloadUrl: url,
       expiresAt: new Date(Date.now() + expires * 1000).toISOString(),
     };
+  }
+
+  async generateThumbUrl(opts: {
+    objectKey: string;
+    expiresInSec?: number;
+  }): Promise<ThumbUrlResult> {
+    // COS 签名 URL 天然可被 <img> 直接加载，与下载直链同机制
+    if (!opts.objectKey.startsWith('thumbnails/')) {
+      throw new Error(`缩略图直链仅允许 thumbnails/ 前缀对象: ${opts.objectKey}`);
+    }
+    const client = await this.getClient();
+    const expires = opts.expiresInSec ?? 3600;
+    const url = client.getObjectUrl({
+      Bucket: this.bucket,
+      Region: this.region,
+      Key: opts.objectKey,
+      Sign: true,
+      Method: 'GET',
+      Expires: expires,
+    });
+    return {
+      url,
+      expiresAt: new Date(Date.now() + expires * 1000).toISOString(),
+    };
+  }
+
+  /** COS 模式签名嵌入 URL，无本地令牌可校验 */
+  verifyThumbParams(_objectKey: string, _exp: string, _sig: string): boolean {
+    return false;
   }
 
   /**

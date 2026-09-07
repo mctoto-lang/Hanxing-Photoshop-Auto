@@ -101,6 +101,12 @@ export default fp(async (app) => {
             name: 'Authorization',
             description: '存储签名令牌（格式：Bearer <token>，由 generateUploadUrl/generateDownloadUrl 签发，仅 local 模式可用。仅接受 Authorization 头传递，不支持 query 参数）',
           },
+          storageSignedUrl: {
+            type: 'apiKey',
+            in: 'query',
+            name: 'sig',
+            description: '缩略图签名直链（key + exp + sig 三个查询参数联合 HMAC 签名，由 GET /v1/templates 列表的 thumbnailUrl 字段签发，默认 1 小时有效；仅限 thumbnails/ 前缀对象，仅 local 模式）',
+          },
           workerRegisterSecret: {
             type: 'apiKey',
             in: 'header',

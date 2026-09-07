@@ -269,4 +269,67 @@ export async function storageRoutes(app: FastifyInstance) {
     reply.header('Content-Disposition', 'inline');
     return storage.getObjectStream(key);
   });
+
+  // 缩略图直链：浏览器 <img> 直接加载（签名入 query，仅限 thumbnails/ 前缀）
+  app.get('/storage/thumb', {
+    schema: {
+      tags: ['storage'],
+      summary: '缩略图直链（local 模式专用）',
+      description: [
+        '模板缩略图直连加载端点：签名参数直接附在 URL 上（<img> 标签无法携带 Authorization 头，',
+        '故对低敏感的缩略图单独放开 query 签名），严格限定 `thumbnails/` 前缀对象，不触及 PSD/输入资产。',
+        '签名由 `GET /v1/templates` 列表接口随 `thumbnailUrl` 字段签发（默认 1 小时有效）。',
+        '',
+        '**注意**：此端点仅 `STORAGE_BACKEND=local` 时可用；COS 模式列表直接返回 COS 签名地址。',
+      ].join('\n'),
+      security: [{ storageSignedUrl: [] }],
+      querystring: {
+        type: 'object',
+        required: ['key', 'exp', 'sig'],
+        properties: {
+          key: { type: 'string', description: '对象键（必须以 thumbnails/ 开头）' },
+          exp: { type: 'string', description: '过期时间（毫秒时间戳）' },
+          sig: { type: 'string', description: 'HMAC 签名' },
+        },
+      },
+      response: {
+        200: {
+          type: 'string',
+          format: 'binary',
+          description: '缩略图二进制流（Content-Type 为图片实际 MIME 类型）',
+        },
+        400: { $ref: 'ErrorResponse#', description: '缺少参数或非 local 模式' },
+        403: { $ref: 'ErrorResponse#', description: '签名无效或已过期' },
+        404: { $ref: 'ErrorResponse#', description: '文件不存在' },
+      },
+    },
+  }, async (req, reply) => {
+    const { key, exp, sig } = (req.query as any) as {
+      key?: string;
+      exp?: string;
+      sig?: string;
+    };
+    if (!key || !exp || !sig) {
+      return reply.code(400).send({ error: 'MISSING_PARAMS', message: '缺少 key/exp/sig' });
+    }
+    const storage = await getStorage();
+    if (!(storage instanceof LocalStorageService)) {
+      return reply.code(400).send({ error: 'NOT_LOCAL_MODE', message: '仅 local 模式支持此端点' });
+    }
+    if (!storage.verifyThumbParams(key, exp, sig)) {
+      return reply.code(403).send({ error: 'INVALID_SIGNATURE', message: '签名无效或已过期' });
+    }
+
+    const meta = await storage.headObject(key);
+    if (!meta) {
+      return reply.code(404).send({ error: 'NOT_FOUND', message: '文件不存在' });
+    }
+    // 剩余有效期内允许浏览器私有缓存（签名地址不可共享缓存，私有模板不落共享代理）
+    const remainSec = Math.max(0, Math.floor((parseInt(exp, 10) - Date.now()) / 1000));
+    reply.header('Content-Type', meta.mimeType);
+    reply.header('Content-Length', meta.size);
+    reply.header('Content-Disposition', 'inline');
+    reply.header('Cache-Control', `private, max-age=${remainSec}`);
+    return storage.getObjectStream(key);
+  });
 }

@@ -21,6 +21,7 @@ import type {
   StorageService,
   UploadUrlResult,
   DownloadUrlResult,
+  ThumbUrlResult,
   ObjectMeta,
 } from './storage.js';
 
@@ -202,6 +203,33 @@ export class LocalStorageService implements StorageService {
     // P2-D：URL 仅含 key，token 单独返回由调用方放入 Authorization 头
     const downloadUrl = `/storage/download?key=${encodeURIComponent(opts.objectKey)}`;
     return { downloadUrl, downloadToken: token, expiresAt };
+  }
+
+  async generateThumbUrl(opts: {
+    objectKey: string;
+    expiresInSec?: number;
+  }): Promise<ThumbUrlResult> {
+    // 缩略图直链仅供 <img> 加载，签名入 query（见接口注释）；范围严格限定
+    if (!opts.objectKey.startsWith('thumbnails/')) {
+      throw new Error(`缩略图直链仅允许 thumbnails/ 前缀对象: ${opts.objectKey}`);
+    }
+    const ttl = opts.expiresInSec ?? 3600;
+    const exp = Date.now() + ttl * 1000;
+    const sig = hmacSign(this.secret, `thumb:${opts.objectKey}:${exp}`);
+    const url =
+      `/storage/thumb?key=${encodeURIComponent(opts.objectKey)}` +
+      `&exp=${exp}&sig=${encodeURIComponent(sig)}`;
+    return { url, expiresAt: new Date(exp).toISOString() };
+  }
+
+  verifyThumbParams(objectKey: string, exp: string, sig: string): boolean {
+    if (!objectKey.startsWith('thumbnails/')) return false;
+    const expNum = parseInt(exp, 10);
+    // 与 verifyUploadToken 同源的 NaN 防绕过校验
+    if (!Number.isFinite(expNum) || expNum <= 0) return false;
+    if (Date.now() > expNum) return false;
+    const expectedSig = hmacSign(this.secret, `thumb:${objectKey}:${exp}`);
+    return safeSigEqual(expectedSig, sig);
   }
 
   async getObject(objectKey: string): Promise<Buffer> {
