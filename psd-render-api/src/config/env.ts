@@ -63,6 +63,13 @@ const schema = z.object({
 
   CORS_ORIGINS: z.string().default('http://localhost:5173,http://localhost:3000'),
 
+  // 素材导入（/v1/assets/import-url）SSRF 白名单补充域名（逗号分隔）：
+  //   ".example.com" 后缀匹配 / "img.example.com" 精确匹配。
+  // 腾讯 COS 桶域名（*.cos.<region>.myqcloud.com / tencentcos.cn）已内置放行，
+  // 此处仅供调用方使用自有 CDN / 其它对象存储时追加。值由 ssrf-guard 直接读
+  // process.env（避免与 env.ts 循环依赖），在此声明仅为文档化与 .env 提示。
+  SSRF_TRUSTED_ASSET_HOSTS: z.string().default(''),
+
   // P2-6：LOG_LEVEL 改为 enum，防止传入无效级别被 pino 静默接受
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 

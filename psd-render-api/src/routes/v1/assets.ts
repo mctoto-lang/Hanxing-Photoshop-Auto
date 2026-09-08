@@ -15,7 +15,7 @@ import { genArtifactCode } from '../../lib/crypto.js';
 import { env } from '../../config/env.js';
 import { Errors } from '../../lib/errors.js';
 import { sha256 } from '../../lib/crypto.js';
-import { validateWebhookUrlDynamic } from '../../lib/ssrf-guard.js';
+import { validateAssetImportUrl } from '../../lib/ssrf-guard.js';
 
 const ALLOWED_MIME = new Set([
   'image/jpeg',
@@ -203,7 +203,7 @@ export async function assetsRoutes(app: FastifyInstance) {
         '',
         '**sha256 秒传**：同租户已存在未过期且内容一致（sha256 相同）的输入资产时直接复用并续期 `INPUT_RETENTION_DAYS`，跳过存储写入（`deduplicated: true`）。',
         '',
-        '**SSRF 防护**：仅允许 http/https，私有/保留地址段拒绝（生产模式），重定向逐跳重新校验（最多 3 跳）。',
+        '**SSRF 防护**：仅允许 http/https，私有/保留地址段拒绝（生产模式），重定向逐跳重新校验（最多 3 跳）。腾讯 COS 桶域名（*.cos.&lt;region&gt;.myqcloud.com / tencentcos.cn）及 SSRF_TRUSTED_ASSET_HOSTS 白名单域名放行内网解析地址（同地域 COS 公网域名解析到内网路由属预期）。',
         '',
         '限制：仅 JPG/PNG/JPEG，单张 ≤ ' + env.MAX_INPUT_SIZE_MB + 'MB，下载超时 60s。',
       ].join('\n'),
@@ -260,7 +260,7 @@ export async function assetsRoutes(app: FastifyInstance) {
       let current = url;
       try {
         for (let hop = 0; hop <= 3; hop++) {
-          const check = await validateWebhookUrlDynamic(current);
+          const check = await validateAssetImportUrl(current);
           if (!check.ok) {
             throw Errors.invalidInputAsset(`素材 URL 不允许：${check.reason}`);
           }

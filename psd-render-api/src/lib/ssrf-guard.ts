@@ -288,3 +288,65 @@ export function assertSafeWebhookUrl(url: string, opts?: SsrfOptions): void {
   const r = validateWebhookUrlStatic(url, opts);
   if (!r.ok) throw new Error(r.reason ?? 'URL 校验失败');
 }
+
+/* ─── 素材导入专用：可信对象存储域名放行 ─── */
+
+/**
+ * 腾讯云同地域机器上，COS 桶公网域名经内网 DNS 解析到 169.254.0.0/16、
+ * 10.x 等内网路由地址（如 169.254.0.47），会被「解析到私有地址即拒绝」的
+ * 动态 SSRF 校验误杀，导致调用方被迫走「下载再上传」的三步中转。
+ *
+ * COS 桶域名（*.myqcloud.com / *.tencentcos.cn）由腾讯统一分配，A 记录
+ * 指向腾讯自家服务入口，不可能被注册成指向调用方内网的别名，因此按
+ * 域名模式放行其 DNS 解析结果（跳过逐 IP 私有段比对）：
+ *   <bucket>.cos.<region>.myqcloud.com           公网 endpoint
+ *   <bucket>.cos.<region>.tencentcos.cn          内网 endpoint
+ *   <bucket>.cos-internal.<region>.myqcloud.com  旧版内网形式
+ *
+ * 另支持 SSRF_TRUSTED_ASSET_HOSTS 环境变量补充自定义可信域名（逗号分隔；
+ * ".example.com" 后缀匹配或 "img.example.com" 精确匹配），供调用方使用
+ * 自有 CDN / 其它对象存储时放行。直接读 process.env 以避免与 env.ts 循环依赖。
+ */
+const TRUSTED_OBJECT_STORAGE_HOST_RE =
+  /^[a-z0-9][a-z0-9-]*\.cos(-internal)?\.[a-z0-9-]+(\.myqcloud\.com|\.tencentcos\.cn)$/i;
+
+function envTrustedAssetHosts(): string[] {
+  return (process.env.SSRF_TRUSTED_ASSET_HOSTS ?? '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+/** 素材导入域名是否可信（COS 桶模式命中或环境变量白名单命中） */
+export function isTrustedAssetImportHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  if (TRUSTED_OBJECT_STORAGE_HOST_RE.test(host)) return true;
+  for (const allow of envTrustedAssetHosts()) {
+    if (allow.startsWith('.') ? host.endsWith(allow) : host === allow) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 素材导入 URL 校验（/v1/assets/import-url 专用）：
+ * 静态 + DNS 动态校验与 validateWebhookUrlDynamic 一致，仅对可信对象存储
+ * 域名跳过「解析到私有地址」拒绝（同地域 COS 内网路由属预期行为）。
+ * 协议限制、IP 字面量、用户信息、重定向逐跳复检等其余 SSRF 规则不受影响。
+ */
+export async function validateAssetImportUrl(
+  url: string,
+  opts?: SsrfOptions,
+): Promise<SsrfCheckResult> {
+  const staticCheck = validateWebhookUrlStatic(url, opts);
+  if (!staticCheck.ok) return staticCheck;
+  const allowPrivate = opts?.allowPrivate ?? !isProd;
+  if (allowPrivate) return { ok: true };
+
+  const parsed = parseUrl(url)!;
+  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (isTrustedAssetImportHost(hostname)) return { ok: true };
+
+  return validateWebhookUrlDynamic(url, opts);
+}
